@@ -7,6 +7,8 @@ import 'package:latlong2/latlong.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../offline/offline_map.dart';
+import '../packs/pack_store.dart';
+import '../packs/packs_screen.dart';
 import '../places/photon_geocoder.dart';
 import '../places/places_database.dart';
 import '../places/search_panel.dart';
@@ -47,6 +49,7 @@ class _MapScreenState extends State<MapScreen> {
   PositioningNotifier? _positioning;
   Timer? _simulation;
   bool _demoStarted = false;
+  bool _presetApplied = false;
 
   @override
   void initState() {
@@ -62,6 +65,19 @@ class _MapScreenState extends State<MapScreen> {
     _route.trafficSampler = _traffic.sampler;
     _startPositioning();
     widget.settings.addListener(_applyLocationSettings);
+    _loadOffline();
+  }
+
+  /// Opens the installed region pack (map, routing graph, search index).
+  /// Called again after packs were downloaded or deleted.
+  void _loadOffline() {
+    // Stop drawing from the old archive before closing it.
+    final old = _offline;
+    if (old != null) setState(() => _offline = null);
+    old?.archive.close();
+    _places?.close();
+    _places = null;
+    _route.places = null;
     OfflineMap.load().then((map) {
       if (!mounted) return;
       setState(() => _offline = map);
@@ -78,7 +94,8 @@ class _MapScreenState extends State<MapScreen> {
       }
       // Debug hook: MAPSOLY_ROUTE="lat,lon;lat,lon" plans a route at startup.
       final preset = Platform.environment['MAPSOLY_ROUTE']?.split(';');
-      if (preset != null && preset.length == 2) {
+      if (preset != null && preset.length == 2 && !_presetApplied) {
+        _presetApplied = true;
         LatLng parse(String s) {
           final p = s.split(',').map(double.parse).toList();
           return LatLng(p[0], p[1]);
@@ -256,6 +273,18 @@ class _MapScreenState extends State<MapScreen> {
         speedMps: speed / 3.6,
       );
     });
+  }
+
+  Future<void> _showPacks() async {
+    final store = PackStore(await OfflineMap.packsDirectory());
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) =>
+            PacksScreen(store: store, onChanged: _loadOffline),
+      ),
+    );
+    store.close();
   }
 
   void _showLocation() {
@@ -439,6 +468,7 @@ class _MapScreenState extends State<MapScreen> {
                             alignment: Alignment.centerRight,
                             child: _MapButtons(
                               onSearch: () => setState(() => _searching = true),
+                              onPacks: _showPacks,
                               onMyPosition: _goToMyPosition,
                               onLocationDetails: _showLocation,
                               hasFix: _positioning?.estimate != null,
@@ -480,6 +510,7 @@ class _MapScreenState extends State<MapScreen> {
 class _MapButtons extends StatelessWidget {
   const _MapButtons({
     required this.onSearch,
+    required this.onPacks,
     required this.onMyPosition,
     required this.onLocationDetails,
     required this.hasFix,
@@ -488,7 +519,7 @@ class _MapButtons extends StatelessWidget {
     required this.onCycleTheme,
   });
 
-  final VoidCallback onSearch, onMyPosition, onLocationDetails;
+  final VoidCallback onSearch, onPacks, onMyPosition, onLocationDetails;
   final bool hasFix;
   final void Function(double delta) onZoom;
   final ThemeMode themeMode;
@@ -537,6 +568,11 @@ class _MapButtons extends StatelessWidget {
               icon: Icon(hasFix ? Icons.my_location : Icons.location_searching),
               onPressed: onMyPosition,
             ),
+          ),
+          IconButton(
+            tooltip: 'Карты для работы без сети',
+            icon: const Icon(Icons.download_for_offline_outlined),
+            onPressed: onPacks,
           ),
           const SizedBox(width: 24, child: Divider(height: 8)),
           IconButton(

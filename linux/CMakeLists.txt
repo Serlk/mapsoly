@@ -111,6 +111,18 @@ install(CODE "
   endif()
   " COMPONENT Runtime)
 
+# MapLibre map engine: the bridge library (cross-built for the phone) and the
+# offline glyphs/sprites, both produced by tool/build_maplibre.sh into
+# linux/prebuilt/. Without them the app falls back to the Flutter map engine.
+# The library is only bundled when it matches the target architecture.
+set(MAPLIBRE_PREBUILT "${CMAKE_CURRENT_SOURCE_DIR}/prebuilt")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+  install(FILES "${MAPLIBRE_PREBUILT}/libmapsoly_mln.so"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime OPTIONAL)
+endif()
+install(DIRECTORY "${MAPLIBRE_PREBUILT}/maplibre"
+  DESTINATION "${INSTALL_BUNDLE_DATA_DIR}" COMPONENT Runtime OPTIONAL)
+
 foreach(bundled_library ${PLUGIN_BUNDLED_LIBRARIES})
   install(FILES "${bundled_library}"
     DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"

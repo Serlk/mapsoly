@@ -42,6 +42,7 @@ dependencies:
   vector_tile_renderer: ^6.1.0
   dbus: ^0.8.1
   sqlite3: ^2.9.0
+  crypto: ^3.0.8
 
 dev_dependencies:
   flutter_test:

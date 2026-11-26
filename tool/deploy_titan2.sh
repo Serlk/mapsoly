@@ -7,8 +7,16 @@ HOST="${TITAN2_HOST:-root@192.168.1.81}"
 KEY="${TITAN2_KEY:-$HOME/.ssh/id_old}"
 DEST=/home/serlk/mapsoly
 cd "$(dirname "$0")/.."
+# MapLibre map engine: bridge library (cross-built here) and offline map assets go
+# into linux/prebuilt/, which the phone's CMake build puts into the bundle. Without
+# them the app still works, with the Flutter map engine.
+if [ -f data/maplibre-build/build-gl/libmbgl-core.a ] && [ -d data/maplibre-assets/fonts ]; then
+  tool/build_maplibre.sh
+else
+  echo "warning: MapLibre not built (see docs/map-engine.md); the app will use the Flutter map engine"
+fi
 tar czf - --exclude=./build --exclude=./.dart_tool --exclude=./android \
-  --exclude=./.git --exclude=./linux/flutter/ephemeral --exclude=./data . |
+  --exclude=./.git --exclude=./linux/flutter/ephemeral --exclude=./data --exclude=./spike . |
   ssh -i "$KEY" "$HOST" "mkdir -p $DEST && tar xzf - -C $DEST && chown -R serlk:serlk $DEST &&
     su serlk -c 'cd $DEST && flutter --suppress-analytics build linux --release'"
 # The routing backend is a separate small binary (see lib/routing/native/).

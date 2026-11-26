@@ -63,6 +63,10 @@ abstract class MapViewController {
   LatLng get center;
   double get zoom;
 
+  /// Compass direction that points up on the screen, in degrees clockwise;
+  /// 0 when the map is north-up (always, for engines that do not rotate).
+  double get bearing;
+
   void move(LatLng center, double zoom);
 
   /// Shows all of [points], leaving [padding] free for the UI on top.
@@ -71,6 +75,9 @@ abstract class MapViewController {
   /// Pans by a fraction of the view's shorter side ((1, 0) is a full side
   /// to the east).
   void panBy(Offset fraction);
+
+  /// Turns the map back to north-up.
+  void resetNorth();
 
   void dispose();
 }

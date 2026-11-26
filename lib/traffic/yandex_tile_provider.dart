@@ -47,11 +47,117 @@ double ellipticalRowOfLatitude(double latitude, int z) {
 
 double _sinh(double v) => (math.exp(v) - math.exp(-v)) / 2;
 
+/// Where Yandex serves the traffic tile ([x], [row], [z]) of data [version];
+/// [scale] 2 gives 512 px tiles.
+Uri yandexTrafficTileUri(
+  int x,
+  int row,
+  int z,
+  String version, {
+  int scale = 2,
+}) => Uri.parse(
+  'https://core-jams-rdr-cache.maps.yandex.net/1.1/tiles'
+  '?trf&l=trf&lang=ru_RU&x=$x&y=$row&z=$z&scale=$scale&tm=$version',
+);
+
+/// One strip of a Yandex tile row placed into a spherical-Mercator tile:
+/// the fractions [srcTop]..[srcBottom] of the Yandex tile in [row] go to the
+/// fractions [dstTop]..[dstBottom] of the map tile.
+@immutable
+class YandexStrip {
+  const YandexStrip(
+    this.row,
+    this.srcTop,
+    this.srcBottom,
+    this.dstTop,
+    this.dstBottom,
+  );
+  final int row;
+  final double srcTop, srcBottom, dstTop, dstBottom;
+}
+
+/// The Yandex rows that cover the map tile row [y] at zoom [z], and how each
+/// is cut and stretched.
+List<YandexStrip> yandexStrips(int y, int z) {
+  final top = ellipticalRow(y.toDouble(), z);
+  final bottom = ellipticalRow(y + 1.0, z);
+  final firstRow = top.floor();
+  final lastRow = (bottom - 1e-9).floor();
+  return [
+    for (var r = firstRow; r <= lastRow; r++)
+      YandexStrip(
+        r,
+        math.max(top, r.toDouble()) - r,
+        math.min(bottom, r + 1.0) - r,
+        (math.max(top, r.toDouble()) - top) / (bottom - top),
+        (math.min(bottom, r + 1.0) - top) / (bottom - top),
+      ),
+  ];
+}
+
+/// Builds the spherical-Mercator traffic tile ([x], [y], [z]) of [size]
+/// pixels from the one or two Yandex tiles covering it. A failed or missing
+/// Yandex tile leaves a transparent gap; null when nothing could be loaded.
+Future<ui.Image?> composeYandexTrafficTile(
+  http.Client client,
+  String version,
+  int x,
+  int y,
+  int z, {
+  int size = 512,
+}) async {
+  Future<ui.Image?> fetch(int row) async {
+    try {
+      final r = await client
+          .get(
+            yandexTrafficTileUri(x, row, z, version),
+            headers: trafficHeaders,
+          )
+          .timeout(const Duration(seconds: 15));
+      if (r.statusCode != 200 || r.bodyBytes.isEmpty) return null;
+      final codec = await ui.instantiateImageCodec(r.bodyBytes);
+      return (await codec.getNextFrame()).image;
+    } on Exception {
+      return null;
+    }
+  }
+
+  final strips = yandexStrips(y, z);
+  final images = await Future.wait(strips.map((s) => fetch(s.row)));
+  if (images.every((i) => i == null)) return null;
+  final recorder = ui.PictureRecorder();
+  final canvas = Canvas(recorder);
+  final paint = Paint()..filterQuality = FilterQuality.medium;
+  final out = size.toDouble();
+  for (var i = 0; i < strips.length; i++) {
+    final img = images[i];
+    if (img == null) continue;
+    final s = strips[i];
+    canvas.drawImageRect(
+      img,
+      Rect.fromLTRB(
+        0,
+        s.srcTop * img.height,
+        img.width.toDouble(),
+        s.srcBottom * img.height,
+      ),
+      Rect.fromLTRB(0, s.dstTop * out, out, s.dstBottom * out),
+      paint,
+    );
+    img.dispose();
+  }
+  return recorder.endRecording().toImage(size, size);
+}
+
+Future<ui.Image> _transparentTile() {
+  final recorder = ui.PictureRecorder();
+  Canvas(recorder);
+  return recorder.endRecording().toImage(512, 512);
+}
+
 @immutable
 class _YandexTile extends ImageProvider<_YandexTile> {
   const _YandexTile(this.x, this.y, this.z, this.version, this.client);
-
-  static const _out = 512.0;
 
   final int x, y, z;
   final String version;
@@ -67,63 +173,11 @@ class _YandexTile extends ImageProvider<_YandexTile> {
     ImageDecoderCallback decode,
   ) => OneFrameImageStreamCompleter(_compose());
 
-  Future<ui.Image?> _fetch(int row) async {
-    final uri = Uri.parse(
-      'https://core-jams-rdr-cache.maps.yandex.net/1.1/tiles'
-      '?trf&l=trf&lang=ru_RU&x=$x&y=$row&z=$z&scale=2&tm=$version',
-    );
-    // A failed or missing tile leaves a transparent gap; the next version
-    // refresh retries it.
-    try {
-      final r = await client
-          .get(uri, headers: trafficHeaders)
-          .timeout(const Duration(seconds: 15));
-      if (r.statusCode != 200 || r.bodyBytes.isEmpty) return null;
-      final codec = await ui.instantiateImageCodec(r.bodyBytes);
-      return (await codec.getNextFrame()).image;
-    } on Exception {
-      return null;
-    }
-  }
-
   Future<ImageInfo> _compose() async {
-    final top = ellipticalRow(y.toDouble(), z);
-    final bottom = ellipticalRow(y + 1.0, z);
-    final firstRow = top.floor();
-    final lastRow = (bottom - 1e-9).floor();
-    final rows = [for (var r = firstRow; r <= lastRow; r++) r];
-    final images = await Future.wait(rows.map(_fetch));
-
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-    final paint = Paint()..filterQuality = FilterQuality.medium;
-    for (var i = 0; i < rows.length; i++) {
-      final img = images[i];
-      if (img == null) continue;
-      final from = math.max(top, rows[i].toDouble());
-      final to = math.min(bottom, rows[i] + 1.0);
-      canvas.drawImageRect(
-        img,
-        Rect.fromLTRB(
-          0,
-          (from - rows[i]) * img.height,
-          img.width.toDouble(),
-          (to - rows[i]) * img.height,
-        ),
-        Rect.fromLTRB(
-          0,
-          (from - top) / (bottom - top) * _out,
-          _out,
-          (to - top) / (bottom - top) * _out,
-        ),
-        paint,
-      );
-      img.dispose();
-    }
-    final image = await recorder.endRecording().toImage(
-      _out.toInt(),
-      _out.toInt(),
-    );
+    final image =
+        await composeYandexTrafficTile(client, version, x, y, z) ??
+        // Nothing loaded: a fully transparent tile, as before.
+        await _transparentTile();
     return ImageInfo(image: image);
   }
 

@@ -23,6 +23,12 @@ class FlutterMapViewController implements MapViewController {
   double get zoom => _map.camera.zoom;
 
   @override
+  double get bearing => _map.camera.rotation;
+
+  @override
+  void resetNorth() => _map.rotate(0);
+
+  @override
   void move(LatLng center, double zoom) => _map.move(center, zoom);
 
   @override

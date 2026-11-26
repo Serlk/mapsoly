@@ -6,6 +6,7 @@
 #endif
 
 #include "flutter/generated_plugin_registrant.h"
+#include "native_view_plugin.h"
 
 struct _MyApplication {
   GtkApplication parent_instance;
@@ -67,7 +68,13 @@ static void my_application_activate(GApplication* application) {
   GdkRGBA background_color;
   // Background defaults to black, override it here if necessary, e.g. #00000000
   // for transparent.
-  gdk_rgba_parse(&background_color, "#000000");
+  // The MapLibre map engine draws in a surface below this window: the window
+  // and the view must then be transparent wherever Flutter paints nothing.
+  const gboolean native_view = native_view_wanted(window);
+  if (native_view) {
+    native_view_prepare_window(window);
+  }
+  gdk_rgba_parse(&background_color, native_view ? "#00000000" : "#000000");
   fl_view_set_background_color(view, &background_color);
   gtk_widget_show(GTK_WIDGET(view));
   gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));
@@ -79,6 +86,7 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
+  native_view_plugin_register(view);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
