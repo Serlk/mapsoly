@@ -1,0 +1,808 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:vector_map_tiles/vector_map_tiles.dart';
+
+import '../offline/offline_map.dart';
+import '../offline/pmtiles_tile_provider.dart';
+import '../places/photon_geocoder.dart';
+import '../places/places_database.dart';
+import '../places/search_panel.dart';
+import '../positioning/positioning.dart';
+import '../settings.dart';
+import '../traffic/traffic.dart';
+import '../traffic/yandex_tile_provider.dart';
+import 'guidance.dart';
+import 'location_sheet.dart';
+import 'route_controller.dart';
+import 'route_panel.dart';
+
+class MapScreen extends StatefulWidget {
+  const MapScreen({super.key, required this.settings});
+
+  final AppSettings settings;
+
+  @override
+  State<MapScreen> createState() => _MapScreenState();
+}
+
+class _MapScreenState extends State<MapScreen> {
+  final _map = MapController();
+  final _traffic = TrafficController();
+  final _route = RouteController();
+  OfflineMap? _offline;
+  Timer? _saveCamera;
+  Object? _fittedRoute;
+  Object? _shownStep;
+  LatLng? _picked;
+  String? _pickedLabel;
+  PlacesDatabase? _places;
+  final _photon = PhotonGeocoder();
+  // Debug hook: MAPSOLY_SEARCH="query" opens search with that text.
+  final _initialQuery = Platform.environment['MAPSOLY_SEARCH'] ?? '';
+  late bool _searching = _initialQuery.isNotEmpty;
+  PositioningNotifier? _positioning;
+  Timer? _simulation;
+  bool _demoStarted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _traffic.select(widget.settings.traffic);
+    // Debug hook: MAPSOLY_TRAFFIC=yandex|google overrides the saved choice.
+    final preset = Platform.environment['MAPSOLY_TRAFFIC'];
+    for (final s in TrafficSource.values) {
+      if (s.name == preset) _traffic.select(s);
+    }
+    _traffic.addListener(() => widget.settings.traffic = _traffic.source);
+    _route.addListener(_onRouteChanged);
+    _route.trafficSampler = _traffic.sampler;
+    _startPositioning();
+    widget.settings.addListener(_applyLocationSettings);
+    OfflineMap.load().then((map) {
+      if (!mounted) return;
+      setState(() => _offline = map);
+      _route.usePack(map?.packDirectory);
+      if (map != null) {
+        try {
+          _places = PlacesDatabase.tryOpen(
+            '${map.packDirectory.path}/places.sqlite',
+          );
+          _route.places = _places;
+        } on Exception catch (e) {
+          debugPrint('Search index not opened: $e');
+        }
+      }
+      // Debug hook: MAPSOLY_ROUTE="lat,lon;lat,lon" plans a route at startup.
+      final preset = Platform.environment['MAPSOLY_ROUTE']?.split(';');
+      if (preset != null && preset.length == 2) {
+        LatLng parse(String s) {
+          final p = s.split(',').map(double.parse).toList();
+          return LatLng(p[0], p[1]);
+        }
+
+        _route.setFrom(parse(preset[0]));
+        _route.setTo(parse(preset[1]));
+      }
+      // First launch with a region pack: start inside the region.
+      if (map != null && widget.settings.center == null) {
+        final b = map.archive.bounds;
+        _map.move(LatLng((b[1] + b[3]) / 2, (b[0] + b[2]) / 2), 12);
+      }
+    }, onError: (Object e) => debugPrint('Offline map failed to open: $e'));
+  }
+
+  @override
+  void dispose() {
+    _saveCamera?.cancel();
+    widget.settings.removeListener(_applyLocationSettings);
+    final positioning = _positioning;
+    if (positioning != null) {
+      positioning.removeListener(_onPosition);
+      positioning.dispose();
+      positioning.engine.dispose();
+    }
+    _simulation?.cancel();
+    _places?.close();
+    _photon.close();
+    _traffic.dispose();
+    _route.dispose();
+    _offline?.archive.close();
+    _map.dispose();
+    super.dispose();
+  }
+
+  void _zoom(double delta) {
+    final c = _map.camera;
+    _map.move(c.center, (c.zoom + delta).clamp(3, 19));
+  }
+
+  void _pan(double dx, double dy) {
+    final c = _map.camera;
+    final step = c.nonRotatedSize.shortestSide / 4;
+    _map.move(
+      c.unprojectAtZoom(c.projectAtZoom(c.center) + Offset(dx, dy) * step),
+      c.zoom,
+    );
+  }
+
+  void _cycleTraffic() {
+    const all = TrafficSource.values;
+    _traffic.select(all[(_traffic.source.index + 1) % all.length]);
+  }
+
+  static const _darkRaster = ColorFilter.matrix([
+    -0.55, -0.25, -0.05, 0, 245, //
+    -0.20, -0.60, -0.05, 0, 245, //
+    -0.20, -0.25, -0.40, 0, 250, //
+    0, 0, 0, 1, 0,
+  ]);
+
+  /// Offline vector map when a region pack is installed, otherwise online
+  /// raster tiles.
+  Widget _baseLayer(BuildContext context) {
+    final offline = _offline;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    if (offline == null) {
+      final tiles = TileLayer(
+        urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+        userAgentPackageName: 'dev.mapsoly.mapsoly',
+        maxNativeZoom: 19,
+        // Raster tiles are 256px; on dense screens load the next zoom level
+        // so the map is not blurry.
+        retinaMode: RetinaMode.isHighDensity(context),
+      );
+      // The public raster tiles have no dark variant: invert and dim them.
+      return dark
+          ? ColorFiltered(colorFilter: _darkRaster, child: tiles)
+          : tiles;
+    }
+    return VectorTileLayer(
+      key: ValueKey(dark),
+      theme: dark ? offline.darkTheme : offline.theme,
+      tileProviders: TileProviders({
+        'openmaptiles': PmTilesVectorTileProvider(offline.archive),
+      }),
+      maximumZoom: 19,
+    );
+  }
+
+  void _onRouteChanged() {
+    final route = _route.selected;
+    // Debug: a preset route with MAPSOLY_SIMULATE starts driving by itself.
+    if (route != null &&
+        !_demoStarted &&
+        Platform.environment['MAPSOLY_SIMULATE'] != null &&
+        Platform.environment['MAPSOLY_ROUTE'] != null) {
+      _demoStarted = true;
+      _route.startGuidance();
+      return;
+    }
+    _updateSimulation();
+    if (route == null) return;
+    // Guidance with a fix: the map follows the matched position.
+    final progress = _route.progress;
+    if (progress != null) {
+      _map.move(progress.point, _map.camera.zoom < 15 ? 16 : _map.camera.zoom);
+      return;
+    }
+    // Guidance by hand: keep the current maneuver in view.
+    if (_route.guiding) {
+      final key = (route, _route.step);
+      if (key == _shownStep) return;
+      _shownStep = key;
+      final steps = route.maneuvers.toList();
+      final m = steps[_route.step.clamp(0, steps.length - 1)];
+      _map.move(route.shape[m.beginShapeIndex], 16);
+      return;
+    }
+    _shownStep = null;
+    if (route == _fittedRoute) return;
+    _fittedRoute = route;
+    _map.fitCamera(
+      CameraFit.coordinates(
+        coordinates: route.shape,
+        padding: const EdgeInsets.fromLTRB(40, 90, 70, 200),
+      ),
+    );
+  }
+
+  List<Widget> _routeLayers(ColorScheme colors) {
+    final routes = _route.routes;
+    final selected = _route.selectedIndex;
+    Marker pin(LatLng p, IconData icon, Color color, {bool tip = true}) =>
+        Marker(
+          point: p,
+          width: 36,
+          height: 36,
+          // Pins point at the place with their tip; dots sit centred on it.
+          alignment: tip ? Alignment.topCenter : Alignment.center,
+          child: Icon(icon, size: tip ? 36 : 26, color: color),
+        );
+    return [
+      if (routes.isNotEmpty)
+        PolylineLayer(
+          polylines: [
+            for (var i = 0; i < routes.length; i++)
+              if (i != selected)
+                Polyline(
+                  points: routes[i].shape,
+                  strokeWidth: 5,
+                  color: colors.outline.withValues(alpha: 0.8),
+                  borderStrokeWidth: 1,
+                  borderColor: colors.surface,
+                ),
+            Polyline(
+              points: routes[selected].shape,
+              strokeWidth: 6,
+              color: colors.primary,
+              borderStrokeWidth: 2,
+              borderColor: colors.surface,
+            ),
+          ],
+        ),
+      MarkerLayer(
+        markers: [
+          if (_route.from != null)
+            pin(_route.from!, Icons.trip_origin, colors.primary, tip: false),
+          if (_route.to != null) pin(_route.to!, Icons.place, colors.error),
+          if (_picked != null)
+            pin(_picked!, Icons.location_on, colors.tertiary),
+        ],
+      ),
+    ];
+  }
+
+  /// Starts Wi-Fi/cell/GNSS positioning. Any failure leaves the app working
+  /// without a position.
+  Future<void> _startPositioning() async {
+    if (!Platform.isLinux) return;
+    try {
+      final dir = await getApplicationSupportDirectory();
+      dir.createSync(recursive: true);
+      final engine = PositioningEngine.linux(
+        dbPath: '${dir.path}/positioning.sqlite',
+      );
+      final notifier = PositioningNotifier(engine)..addListener(_onPosition);
+      if (!mounted) {
+        notifier.dispose();
+        await engine.dispose();
+        return;
+      }
+      setState(() => _positioning = notifier);
+      _applyLocationSettings();
+      await engine.start();
+    } on Object catch (e) {
+      debugPrint('Positioning not started: $e');
+    }
+  }
+
+  void _applyLocationSettings() {
+    final engine = _positioning?.engine;
+    if (engine == null) return;
+    engine.onlineLookups = widget.settings.onlineLocation;
+    engine.wardriving = widget.settings.wardriving;
+  }
+
+  void _onPosition() {
+    if (_simulation != null) return; // a demo drive owns the position
+    final fix = _positioning?.estimate;
+    _route.updateMyPosition(
+      fix == null ? null : LatLng(fix.lat, fix.lon),
+      accuracyM: fix?.accuracyM ?? 30,
+      speedMps: fix?.speedMps,
+    );
+  }
+
+  /// Debug hook: `MAPSOLY_SIMULATE=60` (km/h) drives a fake position along the
+  /// route while guidance is on, to exercise it without a position source.
+  void _updateSimulation() {
+    final speed = double.tryParse(
+      Platform.environment['MAPSOLY_SIMULATE'] ?? '',
+    );
+    final route = _route.selected;
+    if (speed == null || !_route.guiding || route == null) {
+      _simulation?.cancel();
+      _simulation = null;
+      return;
+    }
+    if (_simulation != null) return;
+    final tracker = RouteTracker(route.shape);
+    var along = 0.0;
+    _simulation = Timer.periodic(const Duration(seconds: 1), (_) {
+      along += speed / 3.6;
+      if (along >= tracker.lengthM) {
+        _simulation?.cancel();
+        _simulation = null;
+      }
+      _route.updateMyPosition(
+        tracker.pointAt(along),
+        accuracyM: 10,
+        speedMps: speed / 3.6,
+      );
+    });
+  }
+
+  void _showLocation() {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) =>
+          LocationSheet(positioning: _positioning, settings: widget.settings),
+    );
+  }
+
+  /// Centres the map on the current position, or explains why there is none.
+  void _goToMyPosition() {
+    final fix = _positioning?.estimate;
+    if (fix == null) {
+      _showLocation();
+      return;
+    }
+    final zoom = _map.camera.zoom < 14 ? 15.0 : _map.camera.zoom;
+    _map.move(LatLng(fix.lat, fix.lon), zoom);
+  }
+
+  /// Where to rank search results around: the position, else the map view.
+  LatLng? _searchNear() {
+    final fix = _positioning?.estimate;
+    if (fix != null) return LatLng(fix.lat, fix.lon);
+    try {
+      return _map.camera.center;
+    } on Exception {
+      // The map has not been laid out yet (search opened at startup).
+      return widget.settings.center;
+    }
+  }
+
+  void _onPlaceSelected(PlaceResult place) {
+    final context = place.context;
+    setState(() {
+      _searching = false;
+      _picked = place.point;
+      _pickedLabel = context == null || context.isEmpty
+          ? place.name
+          : '${place.name} — $context';
+    });
+    _map.move(place.point, _map.camera.zoom < 15 ? 16 : _map.camera.zoom);
+  }
+
+  List<Widget> _positionLayers(ColorScheme colors) {
+    final fix = _positioning?.estimate;
+    // While guiding the marker sits on the route; otherwise on the raw fix.
+    final point =
+        _route.progress?.point ??
+        (fix == null ? _route.myPosition : LatLng(fix.lat, fix.lon));
+    if (point == null) return const [];
+    return [
+      CircleLayer(
+        circles: [
+          CircleMarker(
+            point: point,
+            radius: fix?.accuracyM ?? 10,
+            useRadiusInMeter: true,
+            color: colors.primary.withValues(alpha: 0.12),
+            borderColor: colors.primary.withValues(alpha: 0.5),
+            borderStrokeWidth: 1,
+          ),
+          CircleMarker(
+            point: point,
+            radius: 7,
+            color: colors.primary,
+            borderColor: colors.surface,
+            borderStrokeWidth: 3,
+          ),
+        ],
+      ),
+    ];
+  }
+
+  void _cycleTheme() {
+    const order = [ThemeMode.system, ThemeMode.light, ThemeMode.dark];
+    final settings = widget.settings;
+    settings.themeMode =
+        order[(order.indexOf(settings.themeMode) + 1) % order.length];
+  }
+
+  Widget? _trafficLayer() {
+    final version = _traffic.version;
+    if (version == null) return null;
+    switch (_traffic.source) {
+      case TrafficSource.off:
+        return null;
+      case TrafficSource.yandex:
+        return TileLayer(
+          key: ValueKey('yandex-$version'),
+          maxNativeZoom: 19,
+          tileProvider: YandexTrafficTileProvider(
+            client: _traffic.client,
+            version: version,
+          ),
+        );
+      case TrafficSource.google:
+        return TileLayer(
+          key: ValueKey('google-$version'),
+          urlTemplate:
+              'https://mt{s}.google.com/vt?lyrs=h@159000000,traffic'
+              '%7Cseconds_into_week:-1&style=3&x={x}&y={y}&z={z}&_=$version',
+          subdomains: const ['0', '1', '2', '3'],
+          maxNativeZoom: 19,
+          tileProvider: NetworkTileProvider(headers: {...trafficHeaders}),
+        );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CallbackShortcuts(
+      // Single-letter shortcuts would swallow typing in the search field.
+      bindings: _searching
+          ? const {}
+          : {
+              const SingleActivator(LogicalKeyboardKey.slash): () =>
+                  setState(() => _searching = true),
+              const SingleActivator(
+                LogicalKeyboardKey.keyF,
+                control: true,
+              ): () =>
+                  setState(() => _searching = true),
+              const SingleActivator(LogicalKeyboardKey.keyL): _goToMyPosition,
+              const SingleActivator(LogicalKeyboardKey.equal): () => _zoom(1),
+              const SingleActivator(LogicalKeyboardKey.add): () => _zoom(1),
+              const SingleActivator(LogicalKeyboardKey.minus): () => _zoom(-1),
+              const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
+                  _pan(-1, 0),
+              const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
+                  _pan(1, 0),
+              const SingleActivator(LogicalKeyboardKey.arrowUp): () =>
+                  _pan(0, -1),
+              const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
+                  _pan(0, 1),
+              const SingleActivator(LogicalKeyboardKey.keyT): _cycleTraffic,
+              const SingleActivator(LogicalKeyboardKey.keyD): _cycleTheme,
+            },
+      child: Focus(
+        autofocus: true,
+        child: Scaffold(
+          body: ListenableBuilder(
+            listenable: Listenable.merge([_traffic, _route, _positioning]),
+            builder: (context, _) => LayoutBuilder(
+              builder: (context, box) {
+                // Square and landscape screens (Titan 2 is ~480x480dp) have
+                // no spare height: keep every control on the side edges.
+                final short = box.maxHeight < box.maxWidth * 1.3;
+                final traffic = _trafficLayer();
+                return Stack(
+                  children: [
+                    // While search covers the screen the map is neither laid out
+                    // nor painted, so typing does not compete with map rendering.
+                    Offstage(
+                      offstage: _searching,
+                      child: FlutterMap(
+                        mapController: _map,
+                        options: MapOptions(
+                          initialCenter:
+                              widget.settings.center ??
+                              const LatLng(55.7522, 37.6156),
+                          initialZoom: widget.settings.zoom ?? 11,
+                          onLongPress: (_, point) => setState(() {
+                            _picked = point;
+                            _pickedLabel = null;
+                          }),
+                          onPositionChanged: (camera, _) {
+                            _saveCamera?.cancel();
+                            _saveCamera = Timer(
+                              const Duration(seconds: 1),
+                              () => widget.settings.saveCamera(
+                                camera.center,
+                                camera.zoom,
+                              ),
+                            );
+                          },
+                          minZoom: 3,
+                          maxZoom: 19,
+                          interactionOptions: const InteractionOptions(
+                            flags:
+                                InteractiveFlag.all & ~InteractiveFlag.rotate,
+                          ),
+                        ),
+                        children: [
+                          _baseLayer(context),
+                          ?traffic,
+                          ..._positionLayers(Theme.of(context).colorScheme),
+                          ..._routeLayers(Theme.of(context).colorScheme),
+                          const SimpleAttributionWidget(
+                            source: Text('OpenStreetMap contributors'),
+                          ),
+                        ],
+                      ),
+                    ),
+                    SafeArea(
+                      minimum: const EdgeInsets.all(8),
+                      child: Stack(
+                        children: [
+                          if (!_route.guiding)
+                            Align(
+                              alignment: short
+                                  ? Alignment.topLeft
+                                  : Alignment.bottomCenter,
+                              child: Padding(
+                                padding: EdgeInsets.only(
+                                  bottom: short ? 0 : 24,
+                                ),
+                                child: _TrafficSwitch(
+                                  controller: _traffic,
+                                  vertical: short,
+                                ),
+                              ),
+                            ),
+                          if (_route.guiding && _route.selected != null)
+                            Align(
+                              alignment: Alignment.topCenter,
+                              child: Padding(
+                                padding: const EdgeInsets.only(right: 56),
+                                child: GuidanceBanner(controller: _route),
+                              ),
+                            )
+                          else if (_picked != null || _route.active)
+                            Align(
+                              alignment: short
+                                  ? Alignment.bottomLeft
+                                  : Alignment.bottomCenter,
+                              child: Padding(
+                                padding: EdgeInsets.only(
+                                  bottom: short ? 28 : 84,
+                                  right: short ? 64 : 0,
+                                ),
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: 380,
+                                  ),
+                                  child: _picked != null
+                                      ? PickedPointCard(
+                                          point: _picked!,
+                                          label: _pickedLabel,
+                                          onTo: () {
+                                            _route.setTo(
+                                              _picked!,
+                                              label: _pickedLabel,
+                                            );
+                                            setState(() => _picked = null);
+                                          },
+                                          onFrom: () {
+                                            _route.setFrom(
+                                              _picked!,
+                                              label: _pickedLabel,
+                                            );
+                                            setState(() => _picked = null);
+                                          },
+                                          onClose: () =>
+                                              setState(() => _picked = null),
+                                        )
+                                      : RoutePanel(controller: _route),
+                                ),
+                              ),
+                            ),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: _MapButtons(
+                              onSearch: () => setState(() => _searching = true),
+                              onMyPosition: _goToMyPosition,
+                              onLocationDetails: _showLocation,
+                              hasFix: _positioning?.estimate != null,
+                              onZoom: _zoom,
+                              themeMode: widget.settings.themeMode,
+                              onCycleTheme: _cycleTheme,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (_searching)
+                      Positioned.fill(
+                        child: Material(
+                          color: Theme.of(context).colorScheme.surface,
+                          child: SafeArea(
+                            child: SearchPanel(
+                              database: _places,
+                              online: _photon,
+                              near: _searchNear(),
+                              initialQuery: _initialQuery,
+                              onSelected: _onPlaceSelected,
+                              onClose: () => setState(() => _searching = false),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MapButtons extends StatelessWidget {
+  const _MapButtons({
+    required this.onSearch,
+    required this.onMyPosition,
+    required this.onLocationDetails,
+    required this.hasFix,
+    required this.onZoom,
+    required this.themeMode,
+    required this.onCycleTheme,
+  });
+
+  final VoidCallback onSearch, onMyPosition, onLocationDetails;
+  final bool hasFix;
+  final void Function(double delta) onZoom;
+  final ThemeMode themeMode;
+  final VoidCallback onCycleTheme;
+
+  static const _themeIcons = {
+    ThemeMode.system: Icons.brightness_auto_outlined,
+    ThemeMode.light: Icons.light_mode_outlined,
+    ThemeMode.dark: Icons.dark_mode_outlined,
+  };
+  static const _themeNames = {
+    ThemeMode.system: 'как в системе',
+    ThemeMode.light: 'светлая',
+    ThemeMode.dark: 'тёмная',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            tooltip: 'Поиск',
+            icon: const Icon(Icons.search),
+            onPressed: onSearch,
+          ),
+          const SizedBox(width: 24, child: Divider(height: 8)),
+          IconButton(
+            tooltip: 'Приблизить',
+            icon: const Icon(Icons.add),
+            onPressed: () => onZoom(1),
+          ),
+          IconButton(
+            tooltip: 'Отдалить',
+            icon: const Icon(Icons.remove),
+            onPressed: () => onZoom(-1),
+          ),
+          GestureDetector(
+            onLongPress: onLocationDetails,
+            child: IconButton(
+              tooltip: hasFix
+                  ? 'Моё местоположение'
+                  : 'Местоположение не определено',
+              icon: Icon(hasFix ? Icons.my_location : Icons.location_searching),
+              onPressed: onMyPosition,
+            ),
+          ),
+          const SizedBox(width: 24, child: Divider(height: 8)),
+          IconButton(
+            tooltip: 'Тема: ${_themeNames[themeMode]}',
+            icon: Icon(_themeIcons[themeMode]),
+            onPressed: onCycleTheme,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TrafficSwitch extends StatelessWidget {
+  const _TrafficSwitch({required this.controller, required this.vertical});
+
+  final TrafficController controller;
+  final bool vertical;
+
+  static const _labels = {
+    TrafficSource.off: 'Без пробок',
+    TrafficSource.yandex: 'Яндекс',
+    TrafficSource.google: 'Google',
+  };
+
+  String? _status() {
+    if (controller.source == TrafficSource.off) return null;
+    if (controller.error != null) return 'Пробки не загрузились';
+    final at = controller.updatedAt;
+    if (at == null) return 'Загрузка…';
+    final hh = at.hour.toString().padLeft(2, '0');
+    final mm = at.minute.toString().padLeft(2, '0');
+    return 'Обновлено в $hh:$mm';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final status = _status();
+    final statusText = status == null
+        ? null
+        : Text(
+            status,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: controller.error != null
+                  ? theme.colorScheme.error
+                  : theme.colorScheme.onSurfaceVariant,
+            ),
+          );
+
+    // Short screens get a single button with a menu instead of a wide switch.
+    if (vertical) {
+      return Card(
+        clipBehavior: Clip.antiAlias,
+        child: PopupMenuButton<TrafficSource>(
+          tooltip: 'Пробки',
+          initialValue: controller.source,
+          onSelected: controller.select,
+          itemBuilder: (context) => [
+            for (final s in TrafficSource.values)
+              PopupMenuItem(value: s, child: Text(_labels[s]!)),
+          ],
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.traffic_outlined, size: 20),
+                const SizedBox(width: 8),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _labels[controller.source]!,
+                      style: theme.textTheme.labelLarge,
+                    ),
+                    ?statusText,
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SegmentedButton<TrafficSource>(
+              showSelectedIcon: false,
+              style: const ButtonStyle(visualDensity: VisualDensity.compact),
+              segments: [
+                for (final s in TrafficSource.values)
+                  ButtonSegment(value: s, label: Text(_labels[s]!)),
+              ],
+              selected: {controller.source},
+              onSelectionChanged: (s) => controller.select(s.first),
+            ),
+            if (statusText != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(6, 4, 6, 0),
+                child: statusText,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
