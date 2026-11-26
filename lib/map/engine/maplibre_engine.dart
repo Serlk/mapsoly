@@ -201,6 +201,8 @@ class _MapLibreViewState extends State<MapLibreView>
   // style by itself, alternately after <ms> and after 80 ms (a second switch
   // while the first style is still loading), to exercise style changes
   // without touching the screen.
+  bool _benchStarted = false;
+  Timer? _benchTimer;
   bool _flipped = false;
   Timer? _flipTimer;
   bool get _dark => widget.scene.dark != _flipped;
@@ -234,9 +236,24 @@ class _MapLibreViewState extends State<MapLibreView>
     _prepare();
   }
 
+  /// Background colours of the bundled styles, read from their `background`
+  /// layers; shown in the map's place until the map itself has drawn.
+  final Map<String, Color> _styleBackground = {};
+
+  Future<void> _readStyleBackgrounds() async {
+    for (final name in const ['bright', 'dark']) {
+      final argb = styleBackgroundColor(
+        await rootBundle.loadString('assets/styles/$name.json'),
+      );
+      if (argb != null) _styleBackground[name] = Color(argb);
+    }
+    if (mounted) setState(() {});
+  }
+
   /// Everything that has to be there before the native map can be created.
   Future<void> _prepare() async {
     try {
+      await _readStyleBackgrounds();
       final bridge = MapLibreBridge.load();
       if (bridge == null) throw MapLibreBridge.loadError ?? 'no bridge';
       final h = (await _channel.invokeMapMethod<String, Object?>('handles'))!;
@@ -479,7 +496,7 @@ class _MapLibreViewState extends State<MapLibreView>
             if (add == null) {
               drop();
             } else {
-              _trafficRemovals.add(Timer(const Duration(seconds: 3), drop));
+              _trafficRemovals.add(Timer(const Duration(seconds: 10), drop));
             }
           }
       }
@@ -547,10 +564,15 @@ class _MapLibreViewState extends State<MapLibreView>
     _syncScene();
     // Debug hook: the scripted camera run of the prototype.
     final bench = Platform.environment['MAPSOLY_MAP_BENCH'];
-    if (bench != null && bench.isNotEmpty && _generation == 1) {
-      Timer(const Duration(seconds: 3), () {
+    if (bench != null && bench.isNotEmpty && !_benchStarted) {
+      // Once, 3 s after the last style load of the start-up (the pack's
+      // style replaces the online one as soon as the pack is opened).
+      _benchTimer?.cancel();
+      _benchTimer = Timer(const Duration(seconds: 3), () {
         final m = _map;
-        if (m != null) _bridge!.benchStart(m, bench);
+        if (m == null || _benchStarted) return;
+        _benchStarted = true;
+        _bridge!.benchStart(m, bench);
       });
     }
     // Only now is there something to see below the window.
@@ -690,6 +712,7 @@ class _MapLibreViewState extends State<MapLibreView>
     if (widget.controller._view == this) widget.controller._view = null;
     _cameraReport?.cancel();
     _flipTimer?.cancel();
+    _benchTimer?.cancel();
     _gestures.dispose();
     _fling.dispose();
     _destroyMap();
@@ -738,11 +761,11 @@ class _MapLibreViewState extends State<MapLibreView>
           child: CustomPaint(
             painter: _HolePainter(
               open: _holeOpen && widget.visible,
-              // Until the map is up, the style's land colour instead of
-              // whatever is behind the window.
-              placeholder: _dark
-                  ? const Color(0xFF0C0C0C)
-                  : const Color(0xFFF8F4F0),
+              // Until the map is up, the style's own background colour
+              // instead of whatever is behind the window.
+              placeholder:
+                  _styleBackground[_dark ? 'dark' : 'bright'] ??
+                  (_dark ? const Color(0xFF14181C) : const Color(0xFFF8F4F0)),
             ),
             child: Align(
               alignment: Alignment.bottomRight,

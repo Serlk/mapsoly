@@ -373,6 +373,47 @@ class FusionFilter {
     _lastSpeed = _t;
   }
 
+  /// Feeds a full velocity: speed from the vehicle and heading from the
+  /// motion sensors (degrees clockwise from north). This is what lets the
+  /// position advance between radio fixes (dead reckoning).
+  ///
+  /// The two parts have very different errors, so the update is done along
+  /// and across the direction of travel: speed is tight, heading drifts.
+  void addVelocity(
+    double speedMps,
+    double headingDeg,
+    DateTime time, {
+    double? speedSigma,
+    double headingSigmaDeg = 10,
+  }) {
+    if (_proj == null || speedMps.isNaN || speedMps < 0 || headingDeg.isNaN) {
+      return;
+    }
+    _predict(_clampTime(time));
+    final s = speedSigma ?? config.externalSpeedSigma;
+    if (speedMps < config.stationarySpeed) {
+      _zeroVelocity(s * s);
+    } else {
+      final h = degToRad(headingDeg);
+      final sinH = math.sin(h), cosH = math.cos(h);
+      // A heading error of d radians moves the velocity sideways by speed*d.
+      final cross = speedMps * degToRad(headingSigmaDeg);
+      _update(
+        [
+          [0, 0, sinH, cosH],
+          [0, 0, cosH, -sinH],
+        ],
+        [
+          speedMps - (_x[2] * sinH + _x[3] * cosH),
+          -(_x[2] * cosH - _x[3] * sinH),
+        ],
+        [s * s, cross * cross + s * s],
+      );
+      _lastCourse = headingDeg % 360;
+    }
+    _lastSpeed = _t;
+  }
+
   void _zeroVelocity(double variance) {
     _update(
       const [

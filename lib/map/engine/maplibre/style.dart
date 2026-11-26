@@ -234,3 +234,35 @@ String trafficLayerJson(String key) => jsonEncode({
   'type': 'raster',
   'source': '${MapIds.trafficPrefix}$key',
 });
+
+/// Colour of the style's `background` layer as 0xAARRGGBB, or null when the
+/// style has none or writes it in a form other than `#rgb`, `#rrggbb` or
+/// `rgb(r,g,b)`. The view shows it until the map has drawn its first frame.
+int? styleBackgroundColor(String styleJson) {
+  final layers = (jsonDecode(styleJson) as Map<String, dynamic>)['layers'];
+  if (layers is! List) return null;
+  for (final layer in layers) {
+    if (layer is! Map || layer['type'] != 'background') continue;
+    final paint = layer['paint'];
+    final color = paint is Map ? paint['background-color'] : null;
+    if (color is! String) return null;
+    final c = color.trim();
+    final hex = RegExp(r'^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$').firstMatch(c);
+    if (hex != null) {
+      var h = hex.group(1)!;
+      if (h.length == 3) h = h.split('').map((x) => '$x$x').join();
+      return 0xFF000000 | int.parse(h, radix: 16);
+    }
+    final rgb = RegExp(
+      r'^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,[^)]*)?\)$',
+    ).firstMatch(c);
+    if (rgb != null) {
+      final v = [
+        for (var i = 1; i <= 3; i++) int.parse(rgb.group(i)!).clamp(0, 255),
+      ];
+      return 0xFF000000 | (v[0] << 16) | (v[1] << 8) | v[2];
+    }
+    return null;
+  }
+  return null;
+}

@@ -309,6 +309,22 @@ class PositioningEngine {
     _filter.addSpeed(speedMps, time ?? _now());
   }
 
+  /// External speed and heading (OBD speed plus gyro heading): advances the
+  /// position between radio fixes.
+  void addVelocitySample(
+    double speedMps,
+    double headingDeg, {
+    double headingSigmaDeg = 10,
+    DateTime? time,
+  }) {
+    _filter.addVelocity(
+      speedMps,
+      headingDeg,
+      time ?? _now(),
+      headingSigmaDeg: headingSigmaDeg,
+    );
+  }
+
   /// Database statistics.
   DbStats dbStats() => db.stats();
 

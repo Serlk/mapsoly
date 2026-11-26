@@ -133,6 +133,36 @@ void main() {
     }
   });
 
+  test('background colour is read from the style', () {
+    String style(Object? color) => jsonEncode({
+      'layers': [
+        {'id': 'x', 'type': 'fill'},
+        {
+          'id': 'background',
+          'type': 'background',
+          'paint': {'background-color': ?color},
+        },
+      ],
+    });
+    expect(styleBackgroundColor(style('#14181c')), 0xFF14181C);
+    expect(styleBackgroundColor(style('#abc')), 0xFFAABBCC);
+    expect(styleBackgroundColor(style('rgb(12, 12,12)')), 0xFF0C0C0C);
+    expect(styleBackgroundColor(style('rgba(1,2,3,0.5)')), 0xFF010203);
+    expect(styleBackgroundColor(style('hsl(0,0%,5%)')), isNull);
+    expect(styleBackgroundColor(style(null)), isNull);
+    expect(styleBackgroundColor('{"layers":[]}'), isNull);
+    // Both bundled styles have one the app can read.
+    for (final name in ['bright', 'dark']) {
+      expect(
+        styleBackgroundColor(
+          File('assets/styles/$name.json').readAsStringSync(),
+        ),
+        isNotNull,
+        reason: name,
+      );
+    }
+  });
+
   test('traffic source and layer share the versioned id', () {
     final source =
         jsonDecode(trafficSourceJson('http://x/{z}/{x}/{y}.png')) as Map;

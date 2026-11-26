@@ -798,7 +798,18 @@ void mlnb_add_source(mlnb_map* m, const char* id, const char* json) {
         auto& style = m->map->getStyle();
         if (style.getSource(i)) return;
         auto src = mlnb_map::parse<std::unique_ptr<mln::style::Source>>("source", s, i);
-        if (src) style.addSource(std::move(*src));
+        if (!src) return;
+        // Runtime sources are the raster overlays (traffic). By default MapLibre first
+        // fetches tiles four zoom levels up and shows any loaded ancestor stretched over
+        // the missing tile: for thin bright traffic lines that is a screen-wide blurred
+        // blob flashing up on a dark map while tiles load. Fetch only what is shown, and
+        // use a parent as a stand-in only when it is one level up (lines twice as thick).
+        // MLNB_OVERLAY_PLACEHOLDERS=1 restores MapLibre's behaviour for comparison.
+        if (!std::getenv("MLNB_OVERLAY_PLACEHOLDERS")) {
+            (*src)->setPrefetchZoomDelta(0);
+            (*src)->setMaxOverscaleFactorForParentTiles(1);
+        }
+        style.addSource(std::move(*src));
     });
 }
 
