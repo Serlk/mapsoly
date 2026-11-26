@@ -3,20 +3,18 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:vector_map_tiles/vector_map_tiles.dart';
 
 import '../offline/offline_map.dart';
-import '../offline/pmtiles_tile_provider.dart';
 import '../places/photon_geocoder.dart';
 import '../places/places_database.dart';
 import '../places/search_panel.dart';
 import '../positioning/positioning.dart';
 import '../settings.dart';
 import '../traffic/traffic.dart';
-import '../traffic/yandex_tile_provider.dart';
+import 'engine/engines.dart';
+import 'engine/map_engine.dart';
 import 'guidance.dart';
 import 'location_sheet.dart';
 import 'route_controller.dart';
@@ -32,7 +30,7 @@ class MapScreen extends StatefulWidget {
 }
 
 class _MapScreenState extends State<MapScreen> {
-  final _map = MapController();
+  final MapViewController _map = createMapController();
   final _traffic = TrafficController();
   final _route = RouteController();
   OfflineMap? _offline;
@@ -117,59 +115,42 @@ class _MapScreenState extends State<MapScreen> {
     super.dispose();
   }
 
-  void _zoom(double delta) {
-    final c = _map.camera;
-    _map.move(c.center, (c.zoom + delta).clamp(3, 19));
-  }
+  void _zoom(double delta) =>
+      _map.move(_map.center, (_map.zoom + delta).clamp(3, 19));
 
-  void _pan(double dx, double dy) {
-    final c = _map.camera;
-    final step = c.nonRotatedSize.shortestSide / 4;
-    _map.move(
-      c.unprojectAtZoom(c.projectAtZoom(c.center) + Offset(dx, dy) * step),
-      c.zoom,
+  void _pan(double dx, double dy) => _map.panBy(Offset(dx, dy) / 4);
+
+  /// What the map should show right now.
+  MapScene _scene(BuildContext context) {
+    final version = _traffic.version;
+    final routes = _route.routes;
+    final selected = _route.selectedIndex;
+    final fix = _positioning?.estimate;
+    return MapScene(
+      dark: Theme.of(context).brightness == Brightness.dark,
+      offline: _offline,
+      traffic: version == null || _traffic.source == TrafficSource.off
+          ? null
+          : TrafficOverlay(_traffic.source, version, _traffic.client),
+      route: routes.isEmpty ? null : routes[selected].shape,
+      alternatives: [
+        for (var i = 0; i < routes.length; i++)
+          if (i != selected) routes[i].shape,
+      ],
+      from: _route.from,
+      to: _route.to,
+      picked: _picked,
+      // While guiding the marker sits on the route; otherwise on the raw fix.
+      position:
+          _route.progress?.point ??
+          (fix == null ? _route.myPosition : LatLng(fix.lat, fix.lon)),
+      positionAccuracyM: fix?.accuracyM,
     );
   }
 
   void _cycleTraffic() {
     const all = TrafficSource.values;
     _traffic.select(all[(_traffic.source.index + 1) % all.length]);
-  }
-
-  static const _darkRaster = ColorFilter.matrix([
-    -0.55, -0.25, -0.05, 0, 245, //
-    -0.20, -0.60, -0.05, 0, 245, //
-    -0.20, -0.25, -0.40, 0, 250, //
-    0, 0, 0, 1, 0,
-  ]);
-
-  /// Offline vector map when a region pack is installed, otherwise online
-  /// raster tiles.
-  Widget _baseLayer(BuildContext context) {
-    final offline = _offline;
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    if (offline == null) {
-      final tiles = TileLayer(
-        urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-        userAgentPackageName: 'dev.mapsoly.mapsoly',
-        maxNativeZoom: 19,
-        // Raster tiles are 256px; on dense screens load the next zoom level
-        // so the map is not blurry.
-        retinaMode: RetinaMode.isHighDensity(context),
-      );
-      // The public raster tiles have no dark variant: invert and dim them.
-      return dark
-          ? ColorFiltered(colorFilter: _darkRaster, child: tiles)
-          : tiles;
-    }
-    return VectorTileLayer(
-      key: ValueKey(dark),
-      theme: dark ? offline.darkTheme : offline.theme,
-      tileProviders: TileProviders({
-        'openmaptiles': PmTilesVectorTileProvider(offline.archive),
-      }),
-      maximumZoom: 19,
-    );
   }
 
   void _onRouteChanged() {
@@ -188,7 +169,7 @@ class _MapScreenState extends State<MapScreen> {
     // Guidance with a fix: the map follows the matched position.
     final progress = _route.progress;
     if (progress != null) {
-      _map.move(progress.point, _map.camera.zoom < 15 ? 16 : _map.camera.zoom);
+      _map.move(progress.point, _map.zoom < 15 ? 16 : _map.zoom);
       return;
     }
     // Guidance by hand: keep the current maneuver in view.
@@ -204,58 +185,7 @@ class _MapScreenState extends State<MapScreen> {
     _shownStep = null;
     if (route == _fittedRoute) return;
     _fittedRoute = route;
-    _map.fitCamera(
-      CameraFit.coordinates(
-        coordinates: route.shape,
-        padding: const EdgeInsets.fromLTRB(40, 90, 70, 200),
-      ),
-    );
-  }
-
-  List<Widget> _routeLayers(ColorScheme colors) {
-    final routes = _route.routes;
-    final selected = _route.selectedIndex;
-    Marker pin(LatLng p, IconData icon, Color color, {bool tip = true}) =>
-        Marker(
-          point: p,
-          width: 36,
-          height: 36,
-          // Pins point at the place with their tip; dots sit centred on it.
-          alignment: tip ? Alignment.topCenter : Alignment.center,
-          child: Icon(icon, size: tip ? 36 : 26, color: color),
-        );
-    return [
-      if (routes.isNotEmpty)
-        PolylineLayer(
-          polylines: [
-            for (var i = 0; i < routes.length; i++)
-              if (i != selected)
-                Polyline(
-                  points: routes[i].shape,
-                  strokeWidth: 5,
-                  color: colors.outline.withValues(alpha: 0.8),
-                  borderStrokeWidth: 1,
-                  borderColor: colors.surface,
-                ),
-            Polyline(
-              points: routes[selected].shape,
-              strokeWidth: 6,
-              color: colors.primary,
-              borderStrokeWidth: 2,
-              borderColor: colors.surface,
-            ),
-          ],
-        ),
-      MarkerLayer(
-        markers: [
-          if (_route.from != null)
-            pin(_route.from!, Icons.trip_origin, colors.primary, tip: false),
-          if (_route.to != null) pin(_route.to!, Icons.place, colors.error),
-          if (_picked != null)
-            pin(_picked!, Icons.location_on, colors.tertiary),
-        ],
-      ),
-    ];
+    _map.fit(route.shape, const EdgeInsets.fromLTRB(40, 90, 70, 200));
   }
 
   /// Starts Wi-Fi/cell/GNSS positioning. Any failure leaves the app working
@@ -345,7 +275,7 @@ class _MapScreenState extends State<MapScreen> {
       _showLocation();
       return;
     }
-    final zoom = _map.camera.zoom < 14 ? 15.0 : _map.camera.zoom;
+    final zoom = _map.zoom < 14 ? 15.0 : _map.zoom;
     _map.move(LatLng(fix.lat, fix.lon), zoom);
   }
 
@@ -353,12 +283,8 @@ class _MapScreenState extends State<MapScreen> {
   LatLng? _searchNear() {
     final fix = _positioning?.estimate;
     if (fix != null) return LatLng(fix.lat, fix.lon);
-    try {
-      return _map.camera.center;
-    } on Exception {
-      // The map has not been laid out yet (search opened at startup).
-      return widget.settings.center;
-    }
+    // Before the first layout (search opened at startup) there is no camera.
+    return _map.ready ? _map.center : widget.settings.center;
   }
 
   void _onPlaceSelected(PlaceResult place) {
@@ -370,37 +296,7 @@ class _MapScreenState extends State<MapScreen> {
           ? place.name
           : '${place.name} — $context';
     });
-    _map.move(place.point, _map.camera.zoom < 15 ? 16 : _map.camera.zoom);
-  }
-
-  List<Widget> _positionLayers(ColorScheme colors) {
-    final fix = _positioning?.estimate;
-    // While guiding the marker sits on the route; otherwise on the raw fix.
-    final point =
-        _route.progress?.point ??
-        (fix == null ? _route.myPosition : LatLng(fix.lat, fix.lon));
-    if (point == null) return const [];
-    return [
-      CircleLayer(
-        circles: [
-          CircleMarker(
-            point: point,
-            radius: fix?.accuracyM ?? 10,
-            useRadiusInMeter: true,
-            color: colors.primary.withValues(alpha: 0.12),
-            borderColor: colors.primary.withValues(alpha: 0.5),
-            borderStrokeWidth: 1,
-          ),
-          CircleMarker(
-            point: point,
-            radius: 7,
-            color: colors.primary,
-            borderColor: colors.surface,
-            borderStrokeWidth: 3,
-          ),
-        ],
-      ),
-    ];
+    _map.move(place.point, _map.zoom < 15 ? 16 : _map.zoom);
   }
 
   void _cycleTheme() {
@@ -408,34 +304,6 @@ class _MapScreenState extends State<MapScreen> {
     final settings = widget.settings;
     settings.themeMode =
         order[(order.indexOf(settings.themeMode) + 1) % order.length];
-  }
-
-  Widget? _trafficLayer() {
-    final version = _traffic.version;
-    if (version == null) return null;
-    switch (_traffic.source) {
-      case TrafficSource.off:
-        return null;
-      case TrafficSource.yandex:
-        return TileLayer(
-          key: ValueKey('yandex-$version'),
-          maxNativeZoom: 19,
-          tileProvider: YandexTrafficTileProvider(
-            client: _traffic.client,
-            version: version,
-          ),
-        );
-      case TrafficSource.google:
-        return TileLayer(
-          key: ValueKey('google-$version'),
-          urlTemplate:
-              'https://mt{s}.google.com/vt?lyrs=h@159000000,traffic'
-              '%7Cseconds_into_week:-1&style=3&x={x}&y={y}&z={z}&_=$version',
-          subdomains: const ['0', '1', '2', '3'],
-          maxNativeZoom: 19,
-          tileProvider: NetworkTileProvider(headers: {...trafficHeaders}),
-        );
-    }
   }
 
   @override
@@ -474,54 +342,32 @@ class _MapScreenState extends State<MapScreen> {
             listenable: Listenable.merge([_traffic, _route, _positioning]),
             builder: (context, _) => LayoutBuilder(
               builder: (context, box) {
-                // Square and landscape screens (Titan 2 is ~480x480dp) have
+                // Square and landscape screens (Titan 2 is 720x686 logical px) have
                 // no spare height: keep every control on the side edges.
                 final short = box.maxHeight < box.maxWidth * 1.3;
-                final traffic = _trafficLayer();
                 return Stack(
                   children: [
-                    // While search covers the screen the map is neither laid out
-                    // nor painted, so typing does not compete with map rendering.
-                    Offstage(
-                      offstage: _searching,
-                      child: FlutterMap(
-                        mapController: _map,
-                        options: MapOptions(
-                          initialCenter:
-                              widget.settings.center ??
-                              const LatLng(55.7522, 37.6156),
-                          initialZoom: widget.settings.zoom ?? 11,
-                          onLongPress: (_, point) => setState(() {
-                            _picked = point;
-                            _pickedLabel = null;
-                          }),
-                          onPositionChanged: (camera, _) {
-                            _saveCamera?.cancel();
-                            _saveCamera = Timer(
-                              const Duration(seconds: 1),
-                              () => widget.settings.saveCamera(
-                                camera.center,
-                                camera.zoom,
-                              ),
-                            );
-                          },
-                          minZoom: 3,
-                          maxZoom: 19,
-                          interactionOptions: const InteractionOptions(
-                            flags:
-                                InteractiveFlag.all & ~InteractiveFlag.rotate,
-                          ),
-                        ),
-                        children: [
-                          _baseLayer(context),
-                          ?traffic,
-                          ..._positionLayers(Theme.of(context).colorScheme),
-                          ..._routeLayers(Theme.of(context).colorScheme),
-                          const SimpleAttributionWidget(
-                            source: Text('OpenStreetMap contributors'),
-                          ),
-                        ],
-                      ),
+                    // While search covers the screen the map is not drawn, so
+                    // typing does not compete with map rendering.
+                    buildMapView(
+                      visible: !_searching,
+                      controller: _map,
+                      scene: _scene(context),
+                      initialCenter:
+                          widget.settings.center ??
+                          const LatLng(55.7522, 37.6156),
+                      initialZoom: widget.settings.zoom ?? 11,
+                      onLongPress: (point) => setState(() {
+                        _picked = point;
+                        _pickedLabel = null;
+                      }),
+                      onCameraChanged: (center, zoom) {
+                        _saveCamera?.cancel();
+                        _saveCamera = Timer(
+                          const Duration(seconds: 1),
+                          () => widget.settings.saveCamera(center, zoom),
+                        );
+                      },
                     ),
                     SafeArea(
                       minimum: const EdgeInsets.all(8),

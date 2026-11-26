@@ -43,6 +43,9 @@ class RoutePanel extends StatelessWidget {
     final routes = controller.routes;
     final hint = _hint();
     final from = controller.from, to = controller.to;
+    final selected = controller.selectedIndex;
+    final withTraffic =
+        route != null && controller.trafficTime(selected) != null;
 
     return Card(
       child: Padding(
@@ -110,7 +113,7 @@ class RoutePanel extends StatelessWidget {
               ],
             ),
             Padding(
-              padding: const EdgeInsets.only(left: 8),
+              padding: const EdgeInsets.only(left: 8, right: 4),
               child: Row(
                 children: [
                   for (final c in RouteCosting.values)
@@ -125,55 +128,68 @@ class RoutePanel extends StatelessWidget {
                     ),
                   const SizedBox(width: 4),
                   Expanded(
-                    child: Text(
-                      route != null
-                          ? '${formatDuration(controller.timeOf(controller.selectedIndex))} · '
-                                '${formatDistance(route.lengthMeters)}'
-                                '${controller.trafficTime(controller.selectedIndex) != null ? '\nс пробками, без них ${formatDuration(route.duration)}' : ''}'
-                          : hint ?? '',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: route != null
-                          ? theme.textTheme.titleMedium
-                          : theme.textTheme.bodySmall?.copyWith(
+                    child: route != null
+                        ? const SizedBox.shrink()
+                        : Text(
+                            hint ?? '',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall?.copyWith(
                               color: controller.error != null
                                   ? colors.error
                                   : colors.onSurfaceVariant,
                             ),
-                    ),
+                          ),
                   ),
+                  if (route != null)
+                    FilledButton.icon(
+                      style: const ButtonStyle(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      onPressed: controller.startGuidance,
+                      icon: const Icon(Icons.navigation, size: 18),
+                      label: const Text('Поехали'),
+                    ),
                 ],
               ),
             ),
+            // Alternatives never wrap: the row scrolls sideways.
+            if (routes.length > 1)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 2, 8, 0),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      for (var i = 0; i < routes.length; i++)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: ChoiceChip(
+                            visualDensity: VisualDensity.compact,
+                            showCheckmark: false,
+                            label: Text(formatDuration(controller.timeOf(i))),
+                            selected: i == selected,
+                            onSelected: (_) => controller.select(i),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
             if (route != null)
               Padding(
-                padding: const EdgeInsets.fromLTRB(8, 4, 4, 0),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Wrap(
-                        spacing: 6,
-                        children: [
-                          if (routes.length > 1)
-                            for (var i = 0; i < routes.length; i++)
-                              ChoiceChip(
-                                visualDensity: VisualDensity.compact,
-                                showCheckmark: false,
-                                label: Text(
-                                  formatDuration(controller.timeOf(i)),
-                                ),
-                                selected: i == controller.selectedIndex,
-                                onSelected: (_) => controller.select(i),
-                              ),
-                        ],
-                      ),
-                    ),
-                    FilledButton.icon(
-                      onPressed: controller.startGuidance,
-                      icon: const Icon(Icons.navigation),
-                      label: const Text('Поехали'),
-                    ),
-                  ],
+                padding: const EdgeInsets.fromLTRB(14, 4, 8, 0),
+                child: Text(
+                  [
+                    if (routes.length == 1)
+                      formatDuration(controller.timeOf(selected)),
+                    formatDistance(route.lengthMeters),
+                    if (withTraffic)
+                      'без пробок ${formatDuration(route.duration)}',
+                  ].join(' · '),
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: colors.onSurfaceVariant,
+                  ),
                 ),
               ),
           ],

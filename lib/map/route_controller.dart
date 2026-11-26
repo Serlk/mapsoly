@@ -400,6 +400,22 @@ class RouteController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Puts the controller into a planned state without a routing backend.
+  @visibleForTesting
+  void debugSetRoutes(
+    List<Route> routes, {
+    required LatLng from,
+    required LatLng to,
+    List<Duration?> trafficTimes = const [],
+  }) {
+    _from = from;
+    _to = to;
+    _routes = routes;
+    _trafficTimes = trafficTimes;
+    _selected = 0;
+    notifyListeners();
+  }
+
   @override
   void dispose() {
     _backend?.dispose();
@@ -410,7 +426,9 @@ class RouteController extends ChangeNotifier {
 String formatDistance(double meters) {
   if (meters < 950) return '${(meters / 10).round() * 10} м';
   final km = meters / 1000;
-  return km < 10 ? '${km.toStringAsFixed(1)} км' : '${km.round()} км';
+  return km < 10
+      ? '${km.toStringAsFixed(1).replaceAll('.', ',')} км'
+      : '${km.round()} км';
 }
 
 String formatDuration(Duration d) {
