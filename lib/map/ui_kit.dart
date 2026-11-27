@@ -175,7 +175,16 @@ class _GlassState extends State<Glass> {
     if (registry == null || !mounted) return;
     final box = context.findRenderObject();
     if (box is! RenderBox || !box.attached || !box.hasSize) return;
-    registry.report(this, box.localToGlobal(Offset.zero) & box.size);
+    // The engine blurs a rectangle; pulled in far enough to stay inside
+    // the rounded corners, so no square blur shows around the surface.
+    final inset = math.min(
+      widget.radius * 0.3,
+      math.min(box.size.width, box.size.height) / 4,
+    );
+    registry.report(
+      this,
+      (box.localToGlobal(Offset.zero) & box.size).deflate(inset),
+    );
   }
 
   @override

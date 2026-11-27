@@ -60,20 +60,74 @@ class DriveChrome {
 }
 
 /// How far over the limit the driver is.
-enum Speeding { none, over, far }
+enum Speeding {
+  /// Within what the law lets pass.
+  none,
 
-/// [margin] is where "far" begins: fines in Russia start at +20 km/h.
-Speeding speedingOf(double speedKmh, int? limitKmh, {int margin = 20}) {
+  /// Close to the fine: the figure turns red.
+  over,
+
+  /// At the fine: the badge turns red and a signal sounds.
+  far,
+}
+
+/// Fines in Russia start at more than 20 km/h over the limit, so that is
+/// where the alarm is: at a limit of 60 the figure turns red from 76 and
+/// the alarm goes at 80. [tolerance] is that margin, [early] how much
+/// sooner the quiet warning comes.
+Speeding speedingOf(
+  double speedKmh,
+  int? limitKmh, {
+  int tolerance = 20,
+  int early = 5,
+}) {
   if (limitKmh == null) return Speeding.none;
   final shown = speedKmh.round();
-  if (shown > limitKmh + margin) return Speeding.far;
-  if (shown > limitKmh) return Speeding.over;
+  if (shown >= limitKmh + tolerance) return Speeding.far;
+  if (shown > limitKmh + tolerance - early) return Speeding.over;
   return Speeding.none;
 }
 
+/// Decides when the speeding signal sounds: once on reaching the alarm
+/// speed, again every [repeat] while it lasts, and not on every wobble of
+/// the needle around the threshold.
+class SpeedingAlarm {
+  SpeedingAlarm({
+    this.repeat = const Duration(seconds: 20),
+    this.releaseKmh = 3,
+  });
+
+  final Duration repeat;
+
+  /// The alarm rearms once the speed is this far below the alarm speed.
+  final int releaseKmh;
+
+  bool _active = false;
+  DateTime? _last;
+
+  /// Returns true when the signal should sound now.
+  bool update(double? speedKmh, int? limitKmh, DateTime now) {
+    if (speedKmh == null || limitKmh == null) {
+      _active = false;
+      return false;
+    }
+    if (speedingOf(speedKmh, limitKmh) == Speeding.far) {
+      final last = _last;
+      if (!_active || last == null || now.difference(last) >= repeat) {
+        _active = true;
+        _last = now;
+        return true;
+      }
+    } else if (speedingOf(speedKmh + releaseKmh, limitKmh) != Speeding.far) {
+      _active = false;
+    }
+    return false;
+  }
+}
+
 /// The current speed in a round badge, with the road's limit as a road
-/// sign next to it. Over the limit the figure turns red; far over it the
-/// whole badge does.
+/// sign next to it. Near the fine (limit + 20) the figure turns red; at it
+/// the whole badge does.
 class Speedometer extends StatelessWidget {
   const Speedometer({
     super.key,

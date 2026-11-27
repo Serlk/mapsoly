@@ -424,6 +424,31 @@ void main() {
     expect(map.moves, moves);
   });
 
+  testWidgets('search remembers what was picked, the favourite first', (
+    tester,
+  ) async {
+    await start(tester);
+    user.searches
+      ..record('Смольный собор', smolny)
+      ..record('Адмиралтейство', admiralty)
+      ..record('Смольный собор', smolny);
+    await tester.tap(find.text('Поиск'));
+    await tester.pumpAndSettle();
+    expect(find.text('Вы искали'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('Смольный собор')).dy,
+      lessThan(tester.getTopLeft(find.text('Адмиралтейство')).dy),
+    );
+    await shot(tester, 'search_history');
+    // One tap goes there and counts as one more pick.
+    await tester.tap(find.text('Адмиралтейство'));
+    await tester.pumpAndSettle();
+    expect(section(tester), 1);
+    expect(map.center.latitude, closeTo(admiralty.latitude, 1e-4));
+    expect(user.searches.ranked.map((p) => p.count), [2, 2]);
+    expect(user.searches.ranked.first.label, 'Адмиралтейство');
+  });
+
   testWidgets('moving without a route: 3D and no controls, unless off', (
     tester,
   ) async {

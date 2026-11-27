@@ -23,6 +23,7 @@ import '../user/file_exchange.dart';
 import '../user/places_screen.dart';
 import '../user/user_data.dart';
 import '../user/user_places.dart';
+import 'alert_sound.dart';
 import 'drive_camera.dart';
 import 'engine/engines.dart';
 import 'engine/map_engine.dart';
@@ -158,6 +159,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   );
   final _chrome = DriveChrome();
   final _keepAwake = KeepAwake();
+  final _speedAlarm = SpeedingAlarm();
   Timer? _chromeTimer;
   Offset? _pointerDownAt;
   bool _cruising = false;
@@ -240,6 +242,10 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     _chrome.update(speed, DateTime.now());
     // The bottom bar is not rebuilt with the route, so say it out loud.
     if (_chromeHidden != wasHidden) _rebuild();
+    if (_speedAlarm.update(speed, _limit?.kmh, DateTime.now()) &&
+        widget.settings.speedSound) {
+      unawaited(AlertSound.play());
+    }
     // On the dashboard the screen stays on: while guided, and while moving.
     _keepAwake.set(_route.guiding || _chrome.moving);
     final progress = _route.progress;
@@ -1053,20 +1059,65 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   /// Saved places offered in search before anything is typed.
   Widget? _savedPlacesList() {
     final places = widget.user.places.places;
-    if (places.isEmpty) return null;
-    return ListView(
-      children: [
-        const SectionHeader('Мои места'),
-        for (final p in places)
-          BigRow(
-            icon: placeKindIcon(p.kind),
-            title: p.name,
-            subtitle: p.address,
-            trailing: const SizedBox.shrink(),
-            onTap: () => _showPoint(p.point, p.name),
-          ),
-      ],
+    final history = widget.user.searches;
+    if (places.isEmpty && history.isEmpty) return null;
+    return ListenableBuilder(
+      listenable: history,
+      builder: (context, _) {
+        final searched = history.ranked;
+        return ListView(
+          children: [
+            if (places.isNotEmpty) const SectionHeader('Мои места'),
+            for (final p in places)
+              BigRow(
+                icon: placeKindIcon(p.kind),
+                title: p.name,
+                subtitle: p.address,
+                trailing: const SizedBox.shrink(),
+                onTap: () => _showPoint(p.point, p.name),
+              ),
+            // What was looked for before, the most often picked first.
+            if (searched.isNotEmpty) const SectionHeader('Вы искали'),
+            for (final p in searched.take(30))
+              BigRow(
+                icon: Icons.history,
+                title: p.label,
+                trailing: Ui.iconButton(
+                  icon: Icons.close,
+                  label: 'Убрать из истории',
+                  onPressed: () => history.remove(p),
+                ),
+                onTap: () {
+                  history.record(p.label, p.point);
+                  _showPoint(p.point, p.label);
+                },
+              ),
+            if (searched.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.all(Ui.pad),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    style: Ui.text,
+                    onPressed: history.clear,
+                    child: const Text('Очистить историю поиска'),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
     );
+  }
+
+  /// A search result was picked: show it and remember it — unless it lies
+  /// in a privacy zone, where nothing is written down.
+  void _onSearchPicked(PlaceResult r) {
+    final label = _labelOf(r);
+    if (!widget.user.zones.contains(r.point)) {
+      widget.user.searches.record(label, r.point);
+    }
+    _showPoint(r.point, label);
   }
 
   /// What lies on the map in the navigator section.
@@ -1416,6 +1467,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
                   _positioning,
                   _downloads,
                   widget.user.places,
+                  widget.user.searches,
                 ]),
                 builder: (context, _) => LayoutBuilder(
                   builder: (context, box) {
@@ -1494,8 +1546,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
                                     near: _searchNear(),
                                     initialQuery: _initialQuery,
                                     emptyQuery: _savedPlacesList(),
-                                    onSelected: (r) =>
-                                        _showPoint(r.point, _labelOf(r)),
+                                    onSelected: _onSearchPicked,
                                     onClose: () => _open(_Section.navigator),
                                   ),
                                 ),

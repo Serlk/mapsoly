@@ -41,6 +41,7 @@ class AppSettings extends ChangeNotifier {
   ObdConfig _obd = const ObdConfig();
   double? _zoom;
   bool _drive3d = true;
+  bool _speedSound = true;
   bool _tilted = false;
 
   /// Whether the camera tilts and turns along the route during guidance
@@ -50,6 +51,15 @@ class AppSettings extends ChangeNotifier {
   set drive3d(bool value) {
     if (value == _drive3d) return;
     _drive3d = value;
+    _changed();
+  }
+
+  /// Whether reaching the fine (limit + 20 km/h) is announced by a signal.
+  bool get speedSound => _speedSound;
+
+  set speedSound(bool value) {
+    if (value == _speedSound) return;
+    _speedSound = value;
     _changed();
   }
 
@@ -145,6 +155,7 @@ class AppSettings extends ChangeNotifier {
         settings._onlineLocation = json['onlineLocation'] == true;
         settings._wardriving = json['wardriving'] == true;
         settings._drive3d = json['drive3d'] != false;
+        settings._speedSound = json['speedSound'] != false;
         settings._tilted = json['tilted'] == true;
         final obd = json['obd'];
         if (obd is Map<String, dynamic>) {
@@ -187,6 +198,7 @@ class AppSettings extends ChangeNotifier {
             'onlineLocation': _onlineLocation,
             'wardriving': _wardriving,
             'drive3d': _drive3d,
+            'speedSound': _speedSound,
             'tilted': _tilted,
             if (_catalogUrl != null) 'catalogUrl': _catalogUrl,
             'obd': _obd.toJson(),

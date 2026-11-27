@@ -228,6 +228,19 @@ class SettingsScreen extends StatelessWidget {
                     value: settings.drive3d,
                     onChanged: (v) => settings.drive3d = v,
                   ),
+                SwitchListTile(
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: Ui.pad,
+                  ),
+                  secondary: const Icon(Icons.speed),
+                  title: const Text('Сигнал о превышении скорости'),
+                  subtitle: const Text(
+                    'Звук, когда скорость выше ограничения на 20 км/ч — '
+                    'с этого начинаются штрафы',
+                  ),
+                  value: settings.speedSound,
+                  onChanged: (v) => settings.speedSound = v,
+                ),
                 const SectionHeader('Мои места'),
                 BigRow(
                   icon: Icons.star_outline,

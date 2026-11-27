@@ -1,5 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'dart:typed_data';
+
 import 'package:latlong2/latlong.dart';
+import 'package:mapsoly/map/alert_sound.dart';
 import 'package:mapsoly/map/speed_limit.dart';
 import 'package:mapsoly/map/speedometer.dart';
 import 'package:mapsoly/routing/route_models.dart';
@@ -47,12 +50,38 @@ void main() {
     });
   });
 
-  test('speeding: over the limit, and far over it', () {
+  test('speeding: quiet up to the fine, red near it, alarm at it', () {
     expect(speedingOf(100, null), Speeding.none);
-    expect(speedingOf(60.4, 60), Speeding.none);
-    expect(speedingOf(63, 60), Speeding.over);
-    expect(speedingOf(80, 60), Speeding.over);
-    expect(speedingOf(81, 60), Speeding.far);
+    expect(speedingOf(63, 60), Speeding.none);
+    expect(speedingOf(75, 60), Speeding.none);
+    expect(speedingOf(76, 60), Speeding.over);
+    expect(speedingOf(79.4, 60), Speeding.over);
+    expect(speedingOf(80, 60), Speeding.far);
+    expect(speedingOf(131, 110), Speeding.far);
+  });
+
+  test('the alarm sounds once, repeats rarely, rearms below', () {
+    final alarm = SpeedingAlarm();
+    expect(alarm.update(70, 60, at(0)), isFalse);
+    expect(alarm.update(81, 60, at(1)), isTrue);
+    expect(alarm.update(82, 60, at(2)), isFalse);
+    // The needle wobbling around 80 is one event.
+    expect(alarm.update(78, 60, at(3)), isFalse);
+    expect(alarm.update(80, 60, at(4)), isFalse);
+    // Still speeding much later: a reminder.
+    expect(alarm.update(85, 60, at(25)), isTrue);
+    // Slowed down properly, then again.
+    expect(alarm.update(70, 60, at(30)), isFalse);
+    expect(alarm.update(80, 60, at(32)), isTrue);
+    expect(alarm.update(80, null, at(33)), isFalse);
+  });
+
+  test('the alert signal is a valid WAV', () {
+    final wav = AlertSound.wav();
+    expect(String.fromCharCodes(wav.sublist(0, 4)), 'RIFF');
+    expect(String.fromCharCodes(wav.sublist(8, 12)), 'WAVE');
+    expect(wav.length, greaterThan(44 + 22050 * 2 * 0.3));
+    expect(wav.length - 8, wav.buffer.asByteData().getUint32(4, Endian.little));
   });
 
   test('the limit of a road: mapped, or the general rule', () {

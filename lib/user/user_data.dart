@@ -6,6 +6,7 @@ import 'dart:io';
 import 'privacy_guard.dart';
 import 'privacy_zones.dart';
 import 'saved_routes.dart';
+import 'search_history.dart';
 import 'user_places.dart';
 
 /// The user's stores and the guard that enforces the privacy zones.
@@ -15,8 +16,9 @@ class UserData {
     required this.routes,
     required this.zones,
     required this.guard,
+    SearchHistory? searches,
     this.supportDirectory,
-  });
+  }) : searches = searches ?? SearchHistory.inMemory();
 
   /// Loads the stores from `<support>/user`. Never throws: unreadable
   /// files give empty stores with their `loadError` set.
@@ -28,6 +30,7 @@ class UserData {
       routes: SavedRoutes.load(dir),
       zones: zones,
       guard: PrivacyGuard.load(dir, zones),
+      searches: SearchHistory.load(dir),
       supportDirectory: support,
     );
   }
@@ -47,6 +50,9 @@ class UserData {
   final SavedRoutes routes;
   final PrivacyZones zones;
   final PrivacyGuard guard;
+
+  /// Places picked from the search results.
+  final SearchHistory searches;
 
   /// The app's data directory; null when it could not be determined.
   final Directory? supportDirectory;

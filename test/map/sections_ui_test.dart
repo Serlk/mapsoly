@@ -206,6 +206,9 @@ void main() {
       ('Файлы и собранные данные', 'Данные'),
     ]) {
       await tester.scrollUntilVisible(find.text(row), 80, scrollable: list);
+      // Clear of the bottom bar before tapping.
+      await tester.ensureVisible(find.text(row));
+      await tester.pumpAndSettle();
       await tester.tap(find.text(row));
       await tester.pumpAndSettle();
       expect(find.byTooltip('Назад'), findsOneWidget, reason: title);
