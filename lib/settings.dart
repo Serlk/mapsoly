@@ -44,6 +44,7 @@ class AppSettings extends ChangeNotifier {
   double? _zoom;
   bool _drive3d = true;
   bool _speedSound = true;
+  bool _signalHeat = false;
   CompassChoice _compass = CompassChoice.auto;
   String? _magnetSensor, _accelSensor;
   PositionArrow _positionArrow = PositionArrow.chevron;
@@ -65,6 +66,16 @@ class AppSettings extends ChangeNotifier {
   set speedSound(bool value) {
     if (value == _speedSound) return;
     _speedSound = value;
+    _changed();
+  }
+
+  /// Whether the map shows the "signal map": a heat map of the transmitters
+  /// the app has collected itself. Independent of the traffic layer.
+  bool get signalHeat => _signalHeat;
+
+  set signalHeat(bool value) {
+    if (value == _signalHeat) return;
+    _signalHeat = value;
     _changed();
   }
 
@@ -195,6 +206,7 @@ class AppSettings extends ChangeNotifier {
         settings._wardriving = json['wardriving'] == true;
         settings._drive3d = json['drive3d'] != false;
         settings._speedSound = json['speedSound'] != false;
+        settings._signalHeat = json['signalHeat'] == true;
         settings._compass = _byName(CompassChoice.values, json['compass']);
         settings._magnetSensor = json['magnetSensor'] as String?;
         settings._positionArrow = _byName(
@@ -245,6 +257,7 @@ class AppSettings extends ChangeNotifier {
             'wardriving': _wardriving,
             'drive3d': _drive3d,
             'speedSound': _speedSound,
+            'signalHeat': _signalHeat,
             'compass': _compass.name,
             'positionArrow': _positionArrow.name,
             if (_magnetSensor != null) 'magnetSensor': _magnetSensor,

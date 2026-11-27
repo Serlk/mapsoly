@@ -178,6 +178,63 @@ void main() {
     expect(buttons.bottom, lessThanOrEqualTo(686 - 64));
   });
 
+  testWidgets('the signal map: off by default, own data around the view, '
+      'together with the traffic', (tester) async {
+    await start(tester);
+    expect(scene!.signalHeat, isNull);
+    const spot = LatLng(10.5, 20.5);
+    TransmitterSample seen(String id, double lat, double lon) =>
+        TransmitterSample(
+          kind: TransmitterKind.wifi,
+          id: id,
+          lat: lat,
+          lon: lon,
+          weight: 1,
+          fixAccuracyM: 5,
+          signalDbm: -55,
+          time: clock,
+        );
+    engine.db.addSamples([
+      seen('aa:bb:cc:00:00:01', 10.5, 20.5),
+      // Far outside the view.
+      seen('aa:bb:cc:00:00:02', 14.5, 20.5),
+    ]);
+    map.moveCamera(center: spot, zoom: 14);
+    await tester.pump();
+    // Still off: the database is not even looked at.
+    expect(scene!.signalHeat, isNull);
+
+    settings.signalHeat = true;
+    await tester.pump();
+    final heat = scene!.signalHeat!;
+    expect(heat, hasLength(1));
+    expect(heat.single.point.latitude, closeTo(10.5, 1e-6));
+    expect(heat.single.weight, inExclusiveRange(0, 1));
+    // The traffic is a layer of its own: neither changes the other.
+    expect(scene!.traffic, isNull);
+    expect(settings.traffic.name, 'off');
+    // Nothing changed: the same list, so the engine sends nothing again.
+    await tester.pump(const Duration(seconds: 3));
+    expect(identical(scene!.signalHeat, heat), isTrue);
+
+    // Collected during the drive: there within ten seconds.
+    engine.db.addSamples([seen('aa:bb:cc:00:00:03', 10.51, 20.51)]);
+    await tester.pump(const Duration(seconds: 11));
+    await tester.pump();
+    expect(scene!.signalHeat, hasLength(2));
+
+    // The camera goes elsewhere: what is there (nothing).
+    map.moveCamera(center: const LatLng(30, 40), zoom: 14);
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+    expect(scene!.signalHeat, isEmpty);
+
+    settings.signalHeat = false;
+    await tester.pump();
+    expect(scene!.signalHeat, isNull);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('home and work are one tap away, and get out of the way', (
     tester,
   ) async {

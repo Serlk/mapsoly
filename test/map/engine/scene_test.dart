@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:mapsoly/map/engine/map_engine.dart';
 import 'package:mapsoly/traffic/traffic_sampler.dart';
 import 'package:mapsoly/map/engine/maplibre/scene.dart';
 import 'package:mapsoly/map/engine/maplibre/style.dart';
@@ -116,9 +117,64 @@ void main() {
       op = diffScene(t('google-9'), t(null)).single as SetTraffic;
       expect((op.remove, op.add), ('google-9', null));
     });
+
+    test('the heat map is sent when its points change, and only it', () {
+      const off = SceneState(style: 's|heat');
+      final on = SceneState(
+        style: 's|heat',
+        heat: heatGeoJson(const [HeatPoint(a, 0.5)]),
+      );
+      expect(diffScene(off, off), isEmpty);
+      expect(diffScene(on, on), isEmpty);
+      var op = diffScene(off, on).single as SetGeoJson;
+      expect(op.source, MapIds.heat);
+      expect(op.json, on.heat);
+      op = diffScene(on, off).single as SetGeoJson;
+      expect((op.source, op.json), (MapIds.heat, SceneState.emptyGeoJson));
+      // After a style load it is sent again with the rest.
+      expect(
+        diffScene(
+          const SceneState(style: 's|heat'),
+          on,
+        ).map((o) => (o as SetGeoJson).source),
+        [MapIds.heat],
+      );
+    });
   });
 
   group('GeoJSON', () {
+    test('heat: points with a weight, lon/lat order', () {
+      expect(heatGeoJson(null), SceneState.emptyGeoJson);
+      expect(heatGeoJson(const []), SceneState.emptyGeoJson);
+      final json =
+          jsonDecode(
+                heatGeoJson(const [
+                  HeatPoint(LatLng(10.1234567, 20.7654321), 0.123456),
+                  HeatPoint(LatLng(-10.5, -20.25), 1),
+                ]),
+              )
+              as Map<String, dynamic>;
+      expect(json['type'], 'FeatureCollection');
+      expect(json['features'], [
+        {
+          'type': 'Feature',
+          'properties': {'w': 0.12},
+          'geometry': {
+            'type': 'Point',
+            'coordinates': [20.76543, 10.12346],
+          },
+        },
+        {
+          'type': 'Feature',
+          'properties': {'w': 1.0},
+          'geometry': {
+            'type': 'Point',
+            'coordinates': [-20.25, -10.5],
+          },
+        },
+      ]);
+    });
+
     test('routes: alternatives first, lon/lat order, kinds', () {
       final json =
           jsonDecode(

@@ -103,6 +103,30 @@ class TransmitterSample {
   final DateTime time;
 }
 
+/// The transmitters of one grid cell (see [LocationDb.wardrivingGrid]).
+class TransmitterCell {
+  const TransmitterCell({
+    required this.lat,
+    required this.lon,
+    this.wifi = 0,
+    this.cells = 0,
+    this.ble = 0,
+    this.bestWifiDbm,
+    this.bestCellDbm,
+    this.bestBleDbm,
+  });
+
+  /// Mean position of the transmitters in the cell.
+  final double lat, lon;
+
+  /// How many transmitters of each kind.
+  final int wifi, cells, ble;
+
+  /// Strongest signal recorded among each kind; null when there are none
+  /// or the signal was never stored.
+  final double? bestWifiDbm, bestCellDbm, bestBleDbm;
+}
+
 /// Aggregate database statistics for the UI.
 class DbStats {
   const DbStats({
@@ -432,6 +456,95 @@ class LocationDb {
       [south, north, west, east, if (kind != null) kind.index, limit],
     );
     return rows.map(_row).toList();
+  }
+
+  /// How many records of any source lie inside a bounding box, counted up
+  /// to [limit] (the answer is then [limit]). Reads the position index
+  /// only, so it is cheap: a way to find out what a heavier query over the
+  /// same box would cost before running it.
+  int countInBounds({
+    required double south,
+    required double west,
+    required double north,
+    required double east,
+    required int limit,
+  }) =>
+      _db
+              .select(
+                'SELECT COUNT(*) FROM (SELECT 1 FROM transmitter '
+                'WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ? LIMIT ?)',
+                [south, north, west, east, limit],
+              )
+              .first
+              .values
+              .first
+          as int;
+
+  /// Own collection ([TransmitterSource.wardriving]) inside a bounding box,
+  /// aggregated on a grid of [latStep] x [lonStep] degrees: one row per
+  /// non-empty grid cell, placed at the mean position of its transmitters.
+  /// The grid is anchored at 0, 0, so the same step gives the same cells
+  /// wherever the box is. Read-only; uses the lat/lon index. The time grows
+  /// with the number of records of any source in the box (a few
+  /// microseconds each): see [countInBounds].
+  ///
+  /// At most [limit] cells are returned, in no particular order: a caller
+  /// that gets exactly [limit] should ask again with a coarser grid rather
+  /// than draw a part of the area.
+  List<TransmitterCell> wardrivingGrid({
+    required double south,
+    required double west,
+    required double north,
+    required double east,
+    required double latStep,
+    required double lonStep,
+    int limit = 4000,
+  }) {
+    assert(latStep > 0 && lonStep > 0);
+    final wifi = TransmitterKind.wifi.index;
+    final cell = TransmitterKind.cell.index;
+    final ble = TransmitterKind.ble.index;
+    // The box is cut out of the position index alone (`p`), and only then
+    // are the records themselves read: asked of one table, SQLite reads
+    // the record of everything in the latitude band before it looks at the
+    // longitude, which is several times slower.
+    final rows = _db.select(
+      'SELECT AVG(t.lat) AS lat, AVG(t.lon) AS lon, '
+      'SUM(t.kind = $wifi) AS wifi, SUM(t.kind = $cell) AS cell, '
+      'SUM(t.kind = $ble) AS ble, '
+      'MAX(CASE WHEN t.kind = $wifi THEN t.best_signal END) AS wifi_best, '
+      'MAX(CASE WHEN t.kind = $cell THEN t.best_signal END) AS cell_best, '
+      'MAX(CASE WHEN t.kind = $ble THEN t.best_signal END) AS ble_best '
+      'FROM transmitter p CROSS JOIN transmitter t '
+      'ON t.kind = p.kind AND t.id = p.id '
+      'WHERE p.lat BETWEEN ?1 AND ?2 AND p.lon BETWEEN ?3 AND ?4 '
+      'AND t.source = ?5 '
+      'GROUP BY CAST(round(t.lat / ?6) AS INTEGER), '
+      'CAST(round(t.lon / ?7) AS INTEGER) LIMIT ?8',
+      [
+        south,
+        north,
+        west,
+        east,
+        TransmitterSource.wardriving.index,
+        latStep,
+        lonStep,
+        limit,
+      ],
+    );
+    return [
+      for (final r in rows)
+        TransmitterCell(
+          lat: (r['lat'] as num).toDouble(),
+          lon: (r['lon'] as num).toDouble(),
+          wifi: r['wifi'] as int,
+          cells: r['cell'] as int,
+          ble: r['ble'] as int,
+          bestWifiDbm: (r['wifi_best'] as num?)?.toDouble(),
+          bestCellDbm: (r['cell_best'] as num?)?.toDouble(),
+          bestBleDbm: (r['ble_best'] as num?)?.toDouble(),
+        ),
+    ];
   }
 
   /// Runs [body] in one transaction.

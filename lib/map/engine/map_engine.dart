@@ -21,6 +21,7 @@ class MapScene {
     this.blurRects = const [],
     this.buildings3d = false,
     this.traffic,
+    this.signalHeat,
     this.route,
     this.alternatives = const [],
     this.routeTraffic = const [],
@@ -66,6 +67,12 @@ class MapScene {
   /// Traffic overlay to draw above the roads; null when off or not loaded.
   final TrafficOverlay? traffic;
 
+  /// The "signal map": where the app has collected transmitters, drawn as a
+  /// translucent heat map below the traffic and the route. Null when the
+  /// layer is off; an empty list when it is on with nothing to show. The
+  /// list is replaced, never changed in place (engines compare by identity).
+  final List<HeatPoint>? signalHeat;
+
   /// Selected route line and the other alternatives (drawn muted, below).
   final List<LatLng>? route;
   final List<List<LatLng>> alternatives;
@@ -86,6 +93,25 @@ class MapScene {
   /// [positionArrow], without it as a dot.
   final double? positionHeading;
   final PositionArrow positionArrow;
+}
+
+/// One point of a heat map: a place and how much it adds, 0..1.
+@immutable
+class HeatPoint {
+  const HeatPoint(this.point, this.weight);
+
+  final LatLng point;
+  final double weight;
+
+  @override
+  bool operator ==(Object other) =>
+      other is HeatPoint && other.point == point && other.weight == weight;
+
+  @override
+  int get hashCode => Object.hash(point, weight);
+
+  @override
+  String toString() => 'HeatPoint($point, $weight)';
 }
 
 /// Which traffic tiles to draw. [version] changes when the data is refreshed.

@@ -39,6 +39,9 @@ abstract final class MapIds {
   static const routes = 'mapsoly-routes';
   static const points = 'mapsoly-points';
   static const accuracy = 'mapsoly-accuracy';
+
+  /// Source and layer of the signal heat map.
+  static const heat = 'mapsoly-heat';
   static const pinTo = 'mapsoly-pin-to';
   static const pinPicked = 'mapsoly-pin-picked';
   static const arrow = 'mapsoly-arrow';
@@ -63,6 +66,67 @@ const routeTrafficColors = {
   'slow': '#ffc83d',
   'heavy': '#f0503a',
   'jam': '#8e1b1b',
+};
+
+/// The signal heat map: the points of [MapIds.heat], each with a weight `w`
+/// (0..1). It lies below the traffic and the route, translucent, so both
+/// stay readable through it; the ramp starts fully transparent, so places
+/// with nothing collected show the plain map, dark or light.
+///
+/// The points come gathered on a grid whose cell is 20..40 px on the screen
+/// at any zoom (see `SignalHeatArea`), so the radius changes little with the
+/// zoom: enough for neighbouring cells to merge into one field.
+Map<String, Object> heatLayer() => {
+  'id': MapIds.heat,
+  'type': 'heatmap',
+  'source': MapIds.heat,
+  'paint': {
+    'heatmap-weight': [
+      'coalesce',
+      ['get', 'w'],
+      0.3,
+    ],
+    'heatmap-radius': [
+      'interpolate',
+      ['linear'],
+      ['zoom'],
+      4,
+      22,
+      10,
+      28,
+      17,
+      38,
+    ],
+    'heatmap-intensity': [
+      'interpolate',
+      ['linear'],
+      ['zoom'],
+      4,
+      0.7,
+      10,
+      1,
+      17,
+      1.4,
+    ],
+    'heatmap-color': [
+      'interpolate',
+      ['linear'],
+      ['heatmap-density'],
+      0,
+      'rgba(65,105,225,0)',
+      0.12,
+      'rgba(65,105,225,0.75)',
+      0.3,
+      'rgb(0,213,255)',
+      0.5,
+      'rgb(50,215,75)',
+      0.75,
+      'rgb(255,214,10)',
+      1,
+      'rgb(255,59,48)',
+    ],
+    'heatmap-opacity': 0.65,
+  },
 };
 
 /// Route lines; they are inserted below the labels.
@@ -231,7 +295,11 @@ String buildingsColor(String name, Map<String, dynamic> style) {
   return '#3a4048';
 }
 
-void _addOverlays(Map<String, dynamic> style, OverlayColors colors) {
+void _addOverlays(
+  Map<String, dynamic> style,
+  OverlayColors colors, {
+  bool signalHeat = false,
+}) {
   final sources = style['sources'] as Map<String, dynamic>;
   sources[MapIds.routes] = _geoJsonSource();
   sources[MapIds.points] = _geoJsonSource();
@@ -244,7 +312,13 @@ void _addOverlays(Map<String, dynamic> style, OverlayColors colors) {
     (l) => l['type'] != 'symbol' && l['source-layer'] == 'transportation',
   );
   if (below < 0) below = layers.lastIndexWhere((l) => l['type'] != 'symbol');
-  layers.insertAll(below + 1, routeLayers(colors));
+  // The heat map first, so it is under the route; the traffic overlay is
+  // later put right below the first route layer, that is above the heat.
+  layers.insertAll(below + 1, [
+    if (signalHeat) heatLayer(),
+    ...routeLayers(colors),
+  ]);
+  if (signalHeat) sources[MapIds.heat] = _geoJsonSource();
   layers.addAll(markerLayers(colors));
 }
 
@@ -256,6 +330,7 @@ String buildVectorStyle({
   String? pmtilesPath,
   VectorTiles? tiles,
   bool buildings3d = false,
+  bool signalHeat = false,
   required String assetsDir,
   required OverlayColors colors,
 }) {
@@ -273,12 +348,15 @@ String buildVectorStyle({
   };
   style['glyphs'] = 'file://$assetsDir/fonts/{fontstack}/{range}.pbf';
   style['sprite'] = 'file://$assetsDir/sprites/$name/sprite';
-  _addOverlays(style, colors);
+  _addOverlays(style, colors, signalHeat: signalHeat);
   if (buildings3d) {
-    // Under the route (and so under the labels), over everything flat.
+    // Under the route (and so under the labels) and the heat map, over
+    // everything flat.
     final layers = (style['layers'] as List).cast<Map<String, dynamic>>();
     layers.insert(
-      layers.indexWhere((l) => l['id'] == MapIds.firstOverlayLayer),
+      layers.indexWhere(
+        (l) => l['id'] == (signalHeat ? MapIds.heat : MapIds.firstOverlayLayer),
+      ),
       buildingsLayer(buildingsColor(name, style)),
     );
   }
@@ -299,6 +377,7 @@ String buildRasterStyle({
   required String tilesUrl,
   required bool dark,
   required bool highDensity,
+  bool signalHeat = false,
   required String assetsDir,
   required OverlayColors colors,
 }) {
@@ -338,7 +417,7 @@ String buildRasterStyle({
       },
     ],
   };
-  _addOverlays(style, colors);
+  _addOverlays(style, colors, signalHeat: signalHeat);
   return jsonEncode(style);
 }
 

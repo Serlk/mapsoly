@@ -297,6 +297,48 @@ makes the view fall back to the Flutter engine.
   With `-gpu swangle_indirect` (ANGLE on SwiftShader) and with `-gpu host` everything is
   drawn. No GL error is reported in either case.
 
+## Signal map (heat map of the collected transmitters)
+
+A layer of its own, switched in Settings ("Карта сигналов", `AppSettings.signalHeat`, off by
+default) independently of the traffic choice: where the app itself has collected Wi-Fi
+access points, cells and Bluetooth devices. Purely local: read from the positioning
+database, drawn, sent nowhere. Privacy zones need no handling here, the collector stores
+nothing inside them.
+
+- **Data** (`lib/map/signal_heat.dart`). `SignalHeatController` keeps the points for the
+  view. It reads a square twice the longer side of the view around the camera
+  (`SignalHeatArea`), again when the camera is more than 30% of that half-size away from
+  where it last read or the zoom changed the grid, at most once a second (longer after a
+  slow read: 20 times what the read took), and every 10 s while the layer is on, so what
+  was collected a moment ago appears during a drive. An unchanged result keeps the same
+  list, so nothing is sent to the engine again.
+- **Query** (`LocationDb.wardrivingGrid`, read-only). Only `source = wardriving`, all
+  kinds, gathered with `GROUP BY` on a grid anchored at 0, 0: the step along the longitude
+  is 360 / 2^n degrees with n chosen so that a cell is 20-40 px wide on the screen, the
+  step along the latitude is that divided by about 1/cos(latitude) (in steps of a half).
+  One point per non-empty cell, at the mean position of its transmitters. More than 4000
+  cells: the grid is made coarser (up to 3 times), never cut. The database handle is a
+  synchronous sqlite3 object of the UI isolate, so the read happens there; it costs a few
+  microseconds per record of any source in the square. With more than 30 000 records in
+  the square (`LocationDb.countInBounds`, index only) it is not read at all and the layer
+  shows nothing until the map is zoomed in.
+- **Weight** of a cell, 0..1 (`signalHeatWeight`): for each kind
+  `factor * sqrt(min(count, 10) / 10) * strength`, where `strength = clamp((dBm + 100) / 60,
+  0.15, 1)` of the strongest signal seen (-90 dBm and weaker: the floor, -40 dBm: 1,
+  unknown: 0.4) and `factor` is 1 for Wi-Fi, 0.6 for Bluetooth, 0.35 for cells (their
+  position is a rough guess); the sum over the kinds, capped at 1.
+- **MapLibre engine.** `MapScene.signalHeat` (null = off). While it is on, the style has a
+  GeoJSON source and a `heatmap` layer `mapsoly-heat` (`heatLayer()` in
+  `maplibre/style.dart`; the style key includes it, so switching reloads the style once);
+  the points go through the ordinary `SetGeoJson` op, feature property `w` is the weight.
+  Layer order: roads, [3D buildings], **heat**, [traffic raster], route, labels, markers.
+  The traffic overlay is inserted at run time right below the first route layer, that is
+  above the heat. Opacity 0.65, colour ramp from transparent through blue, cyan, green,
+  yellow to red. No native change: the layer arrives inside the style JSON, and the
+  prebuilt bridge libraries contain MapLibre's heatmap layer.
+- **Flutter engine.** A blurred translucent spot per point, coloured by its weight, below
+  the traffic and the route. Spots do not add up into a density.
+
 ## Debug hooks (environment)
 
 | Variable | Effect |
@@ -322,6 +364,11 @@ both bundled styles, scene diffing and GeoJSON, tile-server URL handling and the
 strip maths, and (`surface_test.dart`) the Android texture's size/window bookkeeping
 against a fake platform channel. The native bridge and the widget itself are only tested
 on the device.
+
+The signal map: `test/map/signal_heat_test.dart` (weights, area and grid, the controller's
+throttling), `test/positioning/location_db_grid_test.dart` (the query), the style and scene
+tests above (source and layer only when on, the order), `test/map/map_screen_test.dart`
+(the scene of the screen). How the heat map looks on the device is not covered by tests.
 
 ## Not done
 

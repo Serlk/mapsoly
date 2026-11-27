@@ -320,6 +320,8 @@ class _MapLibreViewState extends State<MapLibreView>
   // string while the screen passes the same list objects.
   Object? _routeIdentity, _alternativesIdentity, _routeTrafficIdentity;
   String _routesJson = SceneState.emptyGeoJson;
+  Object? _heatIdentity;
+  String _heatJson = SceneState.emptyGeoJson;
   Future<List<({String id, Uint8List rgba, int width, int height})>>? _pins;
   Object? _pinsKey;
 
@@ -580,6 +582,10 @@ class _MapLibreViewState extends State<MapLibreView>
         scene.routeTraffic,
       );
     }
+    if (!identical(scene.signalHeat, _heatIdentity)) {
+      _heatIdentity = scene.signalHeat;
+      _heatJson = heatGeoJson(scene.signalHeat);
+    }
     final traffic = scene.traffic;
     final colors = _colors(scheme);
     final packs = _packs(scene);
@@ -591,6 +597,8 @@ class _MapLibreViewState extends State<MapLibreView>
           : '${_dark ? 'dark' : 'bright'}|'
                 '${[for (final p in packs) '${p.path}#${identityHashCode(p.archive)}'].join(',')}|'
                 '${scene.buildings3d ? '3d' : ''}|'
+                // The heat map's source and layer are part of the style.
+                '${scene.signalHeat != null ? 'heat' : ''}|'
                 '${colors.primary}|${colors.surface}|${colors.outline}|'
                 '${scene.positionArrow.name}',
       routes: _routesJson,
@@ -602,6 +610,7 @@ class _MapLibreViewState extends State<MapLibreView>
         picked: scene.picked,
       ),
       accuracy: accuracyGeoJson(scene.position, scene.positionAccuracyM),
+      heat: _heatJson,
       traffic: traffic == null ? null : _trafficKey(traffic),
     );
   }
@@ -748,6 +757,7 @@ class _MapLibreViewState extends State<MapLibreView>
         pmtilesPath: served == null ? packs.single.path : null,
         tiles: served,
         buildings3d: scene.buildings3d || _debug3d,
+        signalHeat: scene.signalHeat != null,
         assetsDir: _surface.assetsDirectory,
         colors: colors,
       );
@@ -756,6 +766,7 @@ class _MapLibreViewState extends State<MapLibreView>
         tilesUrl: _tiles!.urlTemplate('osm'),
         dark: dark,
         highDensity: _scale > 1,
+        signalHeat: scene.signalHeat != null,
         assetsDir: _surface.assetsDirectory,
         colors: colors,
       );

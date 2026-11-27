@@ -33,6 +33,7 @@ import 'keep_awake.dart';
 import 'location_sheet.dart';
 import 'point_picker.dart';
 import 'route_controller.dart';
+import 'signal_heat.dart';
 import 'speed_limit.dart';
 import 'speedometer.dart';
 import 'route_panel.dart';
@@ -333,6 +334,11 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
 
   PositioningNotifier? _positioning;
 
+  /// The "signal map" layer: what the app has collected around the view.
+  late final _heat = SignalHeatController(
+    database: () => _positioning?.engine.db,
+  );
+
   /// Where reading the position takes the user's consent: its state, and
   /// the way to ask.
   LocationAccess? _locationAccess;
@@ -366,7 +372,21 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     _startPositioning();
     widget.settings.addListener(_applyLocationSettings);
     widget.settings.addListener(_applySensorSettings);
+    _heat.addListener(_rebuild);
+    widget.settings.addListener(_applyHeatSetting);
+    _applyHeatSetting();
     _loadOffline();
+  }
+
+  void _applyHeatSetting() {
+    _heat.enabled = widget.settings.signalHeat;
+    _heatView();
+  }
+
+  /// Tells the signal map where the camera is.
+  void _heatView() {
+    if (!_heat.enabled || !_map.ready) return;
+    _heat.viewChanged(_map.center, _map.zoom, _viewSize);
   }
 
   void _rebuild() {
@@ -460,6 +480,8 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     _pick?.completer.complete(null);
     widget.settings.removeListener(_applyLocationSettings);
     widget.settings.removeListener(_applySensorSettings);
+    widget.settings.removeListener(_applyHeatSetting);
+    _heat.dispose();
     _map.cameraChanges.removeListener(_onCameraMoved);
     _hasCompass = false;
     _compassSub?.cancel();
@@ -517,6 +539,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
 
   void _onCameraMoved() {
     if (!_map.ready) return;
+    _heatView();
     if (!_tiltRestored) {
       // The map is up: bring back the 3D view it was left in.
       _tiltRestored = true;
@@ -863,6 +886,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
       traffic: version == null || _traffic.source == TrafficSource.off
           ? null
           : TrafficOverlay(_traffic.source, version, _traffic.client),
+      signalHeat: _heat.points,
       route: routes.isEmpty ? null : routes[selected].shape,
       routeTraffic: _route.trafficSpans,
       alternatives: [
@@ -962,6 +986,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
         }
         setState(() => _positioning = notifier);
         _epoch.value++;
+        _heatView();
         _applyLocationSettings();
       }
     } on Object catch (e) {
@@ -1637,6 +1662,10 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
                     if (box.biggest != _viewSize) {
                       _viewSize = box.biggest;
                       _applyDrivePadding();
+                      // Not now: its result rebuilds this widget.
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (mounted) _heatView();
+                      });
                     }
                     final scene = _scene(context);
                     // Any touch brings back the controls hidden on the move.

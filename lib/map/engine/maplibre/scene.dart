@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:latlong2/latlong.dart';
 
+import '../map_engine.dart' show HeatPoint;
 import 'camera.dart';
 import 'style.dart';
 
@@ -14,6 +15,7 @@ class SceneState {
     this.routes = emptyGeoJson,
     this.points = emptyGeoJson,
     this.accuracy = emptyGeoJson,
+    this.heat = emptyGeoJson,
     this.traffic,
   });
 
@@ -24,6 +26,11 @@ class SceneState {
 
   /// GeoJSON of the three overlay sources.
   final String routes, points, accuracy;
+
+  /// GeoJSON of the signal heat map. Its source and layer are part of the
+  /// style only while the layer is on (the style key says so); otherwise
+  /// this stays empty.
+  final String heat;
 
   /// `<source>/<version>` of the traffic overlay, null when off.
   final String? traffic;
@@ -61,6 +68,7 @@ List<SceneOp> diffScene(SceneState? old, SceneState next) {
     if (old.points != next.points) SetGeoJson(MapIds.points, next.points),
     if (old.accuracy != next.accuracy)
       SetGeoJson(MapIds.accuracy, next.accuracy),
+    if (old.heat != next.heat) SetGeoJson(MapIds.heat, next.heat),
   ];
 }
 
@@ -103,6 +111,26 @@ String routesGeoJson(
             'traffic',
             span.level.name,
           ),
+  ]);
+}
+
+/// The points of the signal heat map, each with its weight `w`.
+String heatGeoJson(List<HeatPoint>? points) {
+  if (points == null || points.isEmpty) return SceneState.emptyGeoJson;
+  return _collection([
+    for (final p in points)
+      {
+        'type': 'Feature',
+        'properties': {'w': double.parse(p.weight.toStringAsFixed(2))},
+        'geometry': {
+          'type': 'Point',
+          // A metre is plenty for a blurred spot.
+          'coordinates': [
+            double.parse(p.point.longitude.toStringAsFixed(5)),
+            double.parse(p.point.latitude.toStringAsFixed(5)),
+          ],
+        },
+      },
   ]);
 }
 

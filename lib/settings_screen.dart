@@ -208,6 +208,20 @@ class SettingsScreen extends StatelessWidget {
                 ),
                 const SectionHeader('Пробки'),
                 choice(_trafficNames, traffic.source, traffic.select),
+                // A layer of its own: shown with any traffic choice.
+                SwitchListTile(
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: Ui.pad,
+                  ),
+                  secondary: const Icon(Icons.blur_on),
+                  title: const Text('Карта сигналов'),
+                  subtitle: const Text(
+                    'Тепловая карта собранных точек Wi-Fi, сот и Bluetooth '
+                    'поверх карты',
+                  ),
+                  value: settings.signalHeat,
+                  onChanged: (v) => settings.signalHeat = v,
+                ),
                 const SectionHeader('Карты'),
                 BigRow(
                   icon: Icons.download_for_offline_outlined,

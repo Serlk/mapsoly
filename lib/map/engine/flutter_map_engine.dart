@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -10,6 +11,7 @@ import '../../traffic/traffic.dart';
 import '../../traffic/traffic_sampler.dart';
 import '../../traffic/yandex_tile_provider.dart';
 import '../position_arrow.dart';
+import '../signal_heat.dart';
 import 'map_engine.dart';
 
 /// Camera control for [FlutterMapView].
@@ -201,6 +203,34 @@ class FlutterMapView extends StatelessWidget {
     }
   }
 
+  /// The signal heat map, as far as this engine goes: a blurred spot per
+  /// point, coloured by its weight. Spots do not add up into a density as
+  /// in the MapLibre engine, but the same places light up.
+  Widget? _heatLayer() {
+    final heat = scene.signalHeat;
+    if (heat == null || heat.isEmpty) return null;
+    return IgnorePointer(
+      child: Opacity(
+        opacity: 0.65,
+        child: ImageFiltered(
+          imageFilter: ui.ImageFilter.blur(sigmaX: 9, sigmaY: 9),
+          child: CircleLayer(
+            circles: [
+              for (final p in heat)
+                CircleMarker(
+                  point: p.point,
+                  radius: 16,
+                  color: signalHeatColor(
+                    p.weight,
+                  ).withValues(alpha: 0.35 + 0.45 * p.weight.clamp(0, 1)),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   List<Widget> _positionLayers(ColorScheme colors) {
     final point = scene.position;
     if (point == null) return const [];
@@ -325,6 +355,8 @@ class FlutterMapView extends StatelessWidget {
       ),
       children: [
         _baseLayer(context),
+        // Below the traffic and the route.
+        ?_heatLayer(),
         ?_trafficLayer(),
         ..._positionLayers(colors),
         ..._routeLayers(colors),

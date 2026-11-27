@@ -186,6 +186,34 @@ void main() {
       tester.getSize(find.byType(SegmentedButton<ThemeMode>)).height,
       greaterThanOrEqualTo(56),
     );
+    // The signal map: a switch of its own next to the traffic choice, off
+    // until asked for, and nothing to do with which traffic is shown.
+    expect(settings.signalHeat, isFalse);
+    await tester.ensureVisible(find.text('Карта сигналов'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        'Тепловая карта собранных точек Wi-Fi, сот и Bluetooth поверх карты',
+      ),
+      findsOneWidget,
+    );
+    final heatRow = rows.indexWhere(
+      (w) => w is SwitchListTile && (w.title as Text).data == 'Карта сигналов',
+    );
+    final trafficHeader = rows.indexWhere(
+      (w) => w is SectionHeader && w.text == 'Пробки',
+    );
+    expect(heatRow, trafficHeader + 2);
+    await tester.tap(find.text('Карта сигналов'));
+    await tester.pump();
+    expect(settings.signalHeat, isTrue);
+    expect(traffic.source, TrafficSource.off);
+    traffic.select(TrafficSource.google);
+    expect(settings.signalHeat, isTrue);
+    traffic.select(TrafficSource.off);
+    await tester.tap(find.text('Карта сигналов'));
+    await tester.pump();
+    expect(settings.signalHeat, isFalse);
     final was = settings.drive3d;
     await tester.scrollUntilVisible(
       find.text('Объёмная карта в движении'),

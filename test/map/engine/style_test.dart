@@ -180,6 +180,154 @@ void main() {
     expect(buildingsColor('bright', {'layers': []}), '#d6d1ca');
   });
 
+  group('signal heat map', () {
+    Map<String, dynamic> vector(
+      String name, {
+      bool heat = true,
+      bool buildings3d = false,
+    }) =>
+        jsonDecode(
+              buildVectorStyle(
+                bundledStyleJson: File(
+                  'assets/styles/$name.json',
+                ).readAsStringSync(),
+                name: name,
+                pmtilesPath: '/p',
+                buildings3d: buildings3d,
+                signalHeat: heat,
+                assetsDir: '/a',
+                colors: _colors,
+              ),
+            )
+            as Map<String, dynamic>;
+    Map<String, dynamic> raster({required bool heat, bool dark = false}) =>
+        jsonDecode(
+              buildRasterStyle(
+                tilesUrl: 'http://127.0.0.1:4000/osm/{z}/{x}/{y}',
+                dark: dark,
+                highDensity: false,
+                signalHeat: heat,
+                assetsDir: '/a',
+                colors: _colors,
+              ),
+            )
+            as Map<String, dynamic>;
+
+    test('off: neither the source nor the layer', () {
+      for (final style in [
+        _vector('bright'),
+        _vector('dark'),
+        vector('bright', heat: false),
+        raster(heat: false),
+      ]) {
+        expect((style['sources'] as Map).keys, isNot(contains(MapIds.heat)));
+        expect(_ids(style), isNot(contains(MapIds.heat)));
+        expect(jsonEncode(style), isNot(contains('heatmap')));
+      }
+    });
+
+    test('on: a GeoJSON source and a heatmap layer, in every style', () {
+      for (final style in [
+        vector('bright'),
+        vector('dark'),
+        raster(heat: true),
+        raster(heat: true, dark: true),
+      ]) {
+        expect(style['sources'][MapIds.heat], {
+          'type': 'geojson',
+          'data': {'type': 'FeatureCollection', 'features': <Object>[]},
+        });
+        final layer =
+            (style['layers'] as List).singleWhere(
+                  (l) => (l as Map)['id'] == MapIds.heat,
+                )
+                as Map;
+        expect(layer['type'], 'heatmap');
+        expect(layer['source'], MapIds.heat);
+      }
+    });
+
+    test('below the route and where the traffic goes, above the roads', () {
+      for (final name in ['bright', 'dark']) {
+        final style = vector(name);
+        final layers = (style['layers'] as List).cast<Map<String, dynamic>>();
+        final ids = _ids(style);
+        final at = ids.indexOf(MapIds.heat);
+        // The traffic overlay is inserted right below the first route
+        // layer: the heat map directly under that stays under the traffic.
+        expect(at, ids.indexOf(MapIds.firstOverlayLayer) - 1);
+        for (final id in [
+          'mapsoly-alt',
+          'mapsoly-route-casing',
+          'mapsoly-route',
+          'mapsoly-route-traffic',
+          'mapsoly-position',
+          'mapsoly-pins',
+        ]) {
+          expect(at, lessThan(ids.indexOf(id)), reason: id);
+        }
+        final lastRoad = layers.lastIndexWhere(
+          (l) => l['type'] != 'symbol' && l['source-layer'] == 'transportation',
+        );
+        expect(at, lastRoad + 1);
+        // Every label of the base map is above it.
+        final firstLabelAfterRoads = layers.indexWhere(
+          (l) => l['type'] == 'symbol',
+          lastRoad,
+        );
+        expect(firstLabelAfterRoads, greaterThan(at));
+        // One layer more than without the heat map.
+        expect(ids.length, _ids(_vector(name)).length + 1);
+      }
+      final ids = _ids(raster(heat: true));
+      expect(ids.indexOf('osm'), lessThan(ids.indexOf(MapIds.heat)));
+      expect(
+        ids.indexOf(MapIds.heat),
+        ids.indexOf(MapIds.firstOverlayLayer) - 1,
+      );
+    });
+
+    test('with extruded buildings: buildings, heat, route', () {
+      final ids = _ids(vector('dark', buildings3d: true));
+      final at = ids.indexOf(MapIds.heat);
+      expect(ids.indexOf(MapIds.buildings3d), at - 1);
+      expect(ids.indexOf(MapIds.firstOverlayLayer), at + 1);
+    });
+
+    test('paint: weight from the point, zoom ramps, transparent start', () {
+      final paint = heatLayer()['paint'] as Map;
+      expect(jsonEncode(paint['heatmap-weight']), contains('["get","w"]'));
+      for (final key in ['heatmap-radius', 'heatmap-intensity']) {
+        final ramp = paint[key] as List;
+        expect(ramp.sublist(0, 3), [
+          'interpolate',
+          ['linear'],
+          ['zoom'],
+        ], reason: key);
+        // Stops in ascending zoom, values positive.
+        final stops = ramp.sublist(3).cast<num>();
+        for (var i = 2; i < stops.length; i += 2) {
+          expect(stops[i], greaterThan(stops[i - 2]), reason: key);
+        }
+        for (var i = 1; i < stops.length; i += 2) {
+          expect(stops[i], greaterThan(0), reason: key);
+        }
+      }
+      final color = paint['heatmap-color'] as List;
+      expect(color.sublist(0, 3), [
+        'interpolate',
+        ['linear'],
+        ['heatmap-density'],
+      ]);
+      // Nothing collected, nothing drawn: zero density is transparent.
+      expect(color[3], 0);
+      expect(color[4], matches(RegExp(r'^rgba\(\d+,\d+,\d+,0\)$')));
+      expect(color[color.length - 2], 1);
+      expect(color.last, 'rgb(255,59,48)');
+      expect(paint['heatmap-opacity'], inInclusiveRange(0.6, 0.7));
+    });
+  });
+
   test('several packs: tiles by URL template with the zoom range', () {
     final style =
         jsonDecode(

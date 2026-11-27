@@ -1,5 +1,6 @@
-/// "The device lies still", from StillnessBridge.kt, fed to the engine so
-/// that the position does not drift between Wi-Fi scans.
+/// "The device lies still", from StillnessBridge.kt on Android or the IIO
+/// accelerometer on Linux, fed to the engine so that the position does not
+/// drift between Wi-Fi scans and as evidence against a lying receiver.
 library;
 
 import 'dart:async';
@@ -24,10 +25,12 @@ class StationaryFeeder {
   StationaryFeeder(
     this.engine, {
     EventChannel events = const EventChannel('mapsoly/android/still'),
+    Stream<bool> Function()? states,
     this.period = const Duration(seconds: 1),
     this.gnssFresh = const Duration(seconds: 3),
     DateTime Function()? now,
   }) : _events = events,
+       _states = states,
        _now = now ?? DateTime.now;
 
   final PositioningEngine engine;
@@ -36,6 +39,9 @@ class StationaryFeeder {
   /// A fix this recent speaks for itself.
   final Duration gnssFresh;
   final EventChannel _events;
+
+  /// Where "still" comes from when not from the Android channel.
+  final Stream<bool> Function()? _states;
   final DateTime Function() _now;
   StreamSubscription<Object?>? _sub;
   Timer? _timer;
@@ -50,7 +56,7 @@ class StationaryFeeder {
 
   /// Starts listening to the sensor (it runs only while listened to).
   void start() {
-    _sub ??= _events.receiveBroadcastStream().listen(
+    _sub ??= (_states?.call() ?? _events.receiveBroadcastStream()).listen(
       (value) {
         final now = value == true;
         if (now != _logged) {

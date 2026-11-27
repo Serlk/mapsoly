@@ -16,6 +16,7 @@ import 'online/resolver.dart';
 import 'sources/android_gnss.dart';
 import 'sources/android_radio.dart';
 import 'sources/android_stillness.dart';
+import 'sources/linux_stillness.dart';
 
 /// An engine and, where reading the position takes the user's consent, the
 /// handle to ask for it.
@@ -83,11 +84,13 @@ PlatformPositioning? createPlatformPositioning({
   PositioningConfig? config,
 }) {
   if (Platform.isLinux) {
+    final engine = PositioningEngine.linux(
+      dbPath: dbPath,
+      config: config ?? const PositioningConfig(),
+    )..journal = PositionJournal.requested(dbPath);
     return PlatformPositioning(
-      PositioningEngine.linux(
-        dbPath: dbPath,
-        config: config ?? const PositioningConfig(),
-      )..journal = PositionJournal.requested(dbPath),
+      engine,
+      stationary: StationaryFeeder(engine, states: () => IioStillness().states),
     );
   }
   if (Platform.isAndroid) {
