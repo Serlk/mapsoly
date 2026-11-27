@@ -220,9 +220,10 @@ class SettingsScreen extends StatelessWidget {
                       horizontal: Ui.pad,
                     ),
                     secondary: const Icon(Icons.view_in_ar_outlined),
-                    title: const Text('Объёмная карта в поездке'),
+                    title: const Text('Объёмная карта в движении'),
                     subtitle: const Text(
-                      'Камера позади машины, карта повёрнута по ходу',
+                      'Когда машина едет, карта наклоняется и '
+                      'поворачивается по ходу — с маршрутом и без него',
                     ),
                     value: settings.drive3d,
                     onChanged: (v) => settings.drive3d = v,

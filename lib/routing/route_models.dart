@@ -476,6 +476,45 @@ class SnappedPoint {
   final Map<String, dynamic> raw;
 }
 
+/// One direction of a road near a point (verbose `/locate`).
+class NearbyEdge {
+  const NearbyEdge({
+    required this.distanceM,
+    required this.headingDeg,
+    required this.speedLimitKmh,
+    required this.roadClass,
+  });
+
+  /// Distance from the requested point to the road.
+  final double distanceM;
+
+  /// Direction of travel at the nearest point, degrees clockwise from
+  /// north.
+  final double headingDeg;
+
+  /// Posted limit from the map data; null when it is not mapped or the
+  /// road has none.
+  final int? speedLimitKmh;
+  final String? roadClass;
+
+  static NearbyEdge? tryParse(Map<String, dynamic> json) {
+    final distance = json['distance'], heading = json['heading'];
+    if (distance is! num || heading is! num) return null;
+    final info = json['edge_info'], edge = json['edge'];
+    final limit = info is Map ? info['speed_limit'] : null;
+    final cls = edge is Map ? edge['classification'] : null;
+    return NearbyEdge(
+      distanceM: distance.toDouble(),
+      headingDeg: heading.toDouble(),
+      // 0 is "not mapped", 255 is Valhalla's "unlimited".
+      speedLimitKmh: limit is num && limit > 0 && limit < 255
+          ? limit.round()
+          : null,
+      roadClass: cls is Map ? cls['classification'] as String? : null,
+    );
+  }
+}
+
 /// An error reported by Valhalla (HTTP 4xx/5xx with a JSON body).
 class ValhallaException implements Exception {
   ValhallaException({required this.message, this.errorCode, this.httpStatus});

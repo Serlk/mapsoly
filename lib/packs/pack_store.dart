@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
@@ -186,7 +187,17 @@ class PackStore {
   /// not connect at the seams. When [tar] belongs to another build than the
   /// tiles already present, the old graph is dropped first (the packs it
   /// came from keep their maps and get their routing back when updated).
-  Set<String> _installRouting(File tar) {
+  ///
+  /// Runs in a separate isolate: a district's graph is close to a gigabyte,
+  /// and the map has to keep moving meanwhile.
+  Future<Set<String>> _installRouting(File tar) {
+    final tarPath = tar.path, rootPath = root.path;
+    return Isolate.run(() => _unpackRouting(tarPath, rootPath));
+  }
+
+  static Set<String> _unpackRouting(String tarPath, String rootPath) {
+    final tar = File(tarPath);
+    final root = Directory(rootPath);
     final tilePath = RegExp(r'^tiles/[0-9]+(/[0-9]+)+\.gph$');
     String clean(String name) =>
         name.startsWith('./') ? name.substring(2) : name;
@@ -205,7 +216,7 @@ class PackStore {
         'В пакете нет сведений о сборке графа маршрутов',
       );
     }
-    final shared = sharedRouting;
+    final shared = Directory('${root.path}/.shared/valhalla');
     final marker = File('${shared.path}/build.txt');
     if (marker.existsSync() && marker.readAsStringSync().trim() != build) {
       shared.deleteSync(recursive: true);
@@ -326,7 +337,7 @@ class PackStore {
       final tar = File('${staging.path}/${file.path}');
       // Absent when an earlier attempt already unpacked it.
       if (tar.existsSync()) {
-        tiles.addAll(_installRouting(tar));
+        tiles.addAll(await _installRouting(tar));
         tar.deleteSync();
         File(
           '${staging.path}/$_routingList',

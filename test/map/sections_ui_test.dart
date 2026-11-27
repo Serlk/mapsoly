@@ -188,11 +188,11 @@ void main() {
     );
     final was = settings.drive3d;
     await tester.scrollUntilVisible(
-      find.text('Объёмная карта в поездке'),
+      find.text('Объёмная карта в движении'),
       80,
       scrollable: list,
     );
-    await tester.tap(find.text('Объёмная карта в поездке'));
+    await tester.tap(find.text('Объёмная карта в движении'));
     expect(settings.drive3d, !was);
     settings.drive3d = was;
 

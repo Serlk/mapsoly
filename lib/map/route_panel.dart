@@ -488,11 +488,10 @@ class GuidanceBanner extends StatelessWidget {
           ? Duration.zero
           : Duration(seconds: (time.inSeconds * left / total).round());
       final arrive = (now?.call() ?? DateTime.now()).add(timeLeft);
-      final speed = controller.speedKmh;
+      // The speed has its own badge on the map.
       detail = [
         formatDistance(left),
         'прибытие в ${formatClock(arrive)}',
-        if (speed != null) '${speed.round()} км/ч',
       ].join(' · ');
     } else {
       shown = steps[i];

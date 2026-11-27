@@ -9,6 +9,7 @@ import 'package:mapsoly/map/drive_camera.dart';
 import 'package:mapsoly/map/engine/map_engine.dart';
 import 'package:mapsoly/map/map_screen.dart';
 import 'package:mapsoly/map/route_controller.dart';
+import 'package:mapsoly/map/speedometer.dart';
 import 'package:mapsoly/map/route_panel.dart';
 import 'package:mapsoly/places/search_panel.dart';
 import 'package:mapsoly/positioning/positioning.dart';
@@ -414,13 +415,50 @@ void main() {
     expect(find.byIcon(Icons.navigation), findsWidgets);
     await shot(tester, 'map_location_heading');
 
-    // A touch on the map: free again.
-    await tester.tapAt(const Offset(300, 300));
+    // Dragging the map: free again.
+    await tester.dragFrom(const Offset(300, 300), const Offset(60, 40));
     await tester.pumpAndSettle();
     expect(find.byTooltip('Показать моё местоположение'), findsOneWidget);
     final moves = map.moves;
     await fix(tester, palace);
     expect(map.moves, moves);
+  });
+
+  testWidgets('moving without a route: 3D and no controls, unless off', (
+    tester,
+  ) async {
+    await start(tester);
+    route.updateMyPosition(palace, accuracyM: 5, speedMps: 1);
+    await tester.pumpAndSettle();
+    expect(map.pitch, 0);
+    expect(find.byType(MapButtons), findsOneWidget);
+    expect(find.byType(Speedometer), findsNothing);
+
+    route.updateMyPosition(admiralty, accuracyM: 5, speedMps: 14);
+    await tester.pumpAndSettle();
+    expect(map.pitch, tiltedPitch);
+    expect(find.byType(MapButtons), findsNothing);
+    expect(find.byType(Speedometer), findsOneWidget);
+    await shot(tester, 'map_cruising');
+
+    // The 3D button is the same switch as in the settings.
+    await tester.tapAt(const Offset(300, 300));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('3D'));
+    await tester.pumpAndSettle();
+    expect(settings.drive3d, isFalse);
+    expect(map.pitch, 0);
+  });
+
+  testWidgets('3D on the move switched off: the map stays flat', (
+    tester,
+  ) async {
+    await start(tester);
+    settings.drive3d = false;
+    route.updateMyPosition(admiralty, accuracyM: 5, speedMps: 14);
+    await tester.pumpAndSettle();
+    expect(map.pitch, 0);
+    expect(find.byType(MapButtons), findsNothing);
   });
 
   testWidgets('the driving camera follows, pauses on a touch, resumes', (
@@ -445,8 +483,32 @@ void main() {
     expect(scene!.buildings3d, isTrue);
     expect(find.text('Вернуться к маршруту'), findsNothing);
 
-    // The driver looks around.
+    // Nothing but the road on the move: no bar, no buttons, the speed.
+    expect(find.byType(MapButtons), findsNothing);
+    expect(tester.getSize(find.byType(NavigationBar)).height, 64);
+    expect(
+      tester.getTopLeft(find.byType(NavigationBar)).dy,
+      greaterThanOrEqualTo(686),
+    );
+    expect(
+      find.descendant(of: find.byType(Speedometer), matching: find.text('50')),
+      findsOneWidget,
+    );
+
+    // A tap brings the controls back and the camera keeps following.
     await tester.tapAt(const Offset(300, 400));
+    await tester.pumpAndSettle();
+    expect(find.byType(MapButtons), findsOneWidget);
+    expect(tester.getTopLeft(find.byType(NavigationBar)).dy, lessThan(686));
+    expect(find.text('Вернуться к маршруту'), findsNothing);
+    await shot(tester, 'map_driving_controls');
+    // Left alone, they go away again.
+    await tester.pump(const Duration(seconds: 7));
+    await tester.pumpAndSettle();
+    expect(find.byType(MapButtons), findsNothing);
+
+    // The driver looks around.
+    await tester.dragFrom(const Offset(300, 400), const Offset(80, 40));
     await tester.pumpAndSettle();
     expect(find.text('Вернуться к маршруту'), findsOneWidget);
     await shot(tester, 'map_driving_paused');

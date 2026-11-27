@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:mapsoly/map/route_controller.dart';
 import 'package:mapsoly/map/route_panel.dart';
+import 'package:mapsoly/map/speedometer.dart';
 import 'package:mapsoly/places/places_database.dart';
 import 'package:mapsoly/routing/valhalla_client.dart';
 
@@ -288,7 +289,8 @@ void main() {
       ),
     );
     expect(find.textContaining('прибытие в '), findsOneWidget);
-    expect(find.textContaining('60 км/ч'), findsOneWidget);
+    // The speed lives in its own badge on the map, not in the banner.
+    expect(find.textContaining('км/ч'), findsNothing);
     // No manual stepping while a position drives the banner.
     expect(find.byTooltip('Следующий манёвр'), findsNothing);
     // The distance to the maneuver is the largest text of the banner.
@@ -437,5 +439,29 @@ void main() {
     expect(maneuverIcon(ManeuverType.uturnLeft), Icons.u_turn_left);
     expect(maneuverIcon(ManeuverType.destination), Icons.flag);
     expect(maneuverIcon(ManeuverType.roundaboutEnter), Icons.roundabout_left);
+  });
+
+  testWidgets('the speed badge and the limit sign', (tester) async {
+    await both(
+      tester,
+      'speedometer',
+      () => onMap(
+        const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Speedometer(speedKmh: 47),
+            SizedBox(height: 12),
+            Speedometer(speedKmh: 58, limitKmh: 60),
+            SizedBox(height: 12),
+            Speedometer(speedKmh: 72, limitKmh: 60),
+            SizedBox(height: 12),
+            Speedometer(speedKmh: 127, limitKmh: 100),
+          ],
+        ),
+      ),
+    );
+    expect(find.byType(SpeedLimitSign), findsNWidgets(3));
+    expect(find.text('100'), findsOneWidget);
   });
 }

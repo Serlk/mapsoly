@@ -3,6 +3,7 @@
 /// of everything that lies on the map, page frames and small dialogs.
 library;
 
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -127,6 +128,7 @@ class Glass extends StatefulWidget {
     this.color,
     this.opacity = 0.86,
     this.border = true,
+    this.blur = true,
   });
 
   final Widget child;
@@ -140,6 +142,11 @@ class Glass extends StatefulWidget {
   /// labels, uses less.
   final double opacity;
   final bool border;
+
+  /// Whether the map behind is blurred. The map engine blurs whole
+  /// rectangles, which shows as square corners around a small round
+  /// surface; those go without blur and are a little more solid instead.
+  final bool blur;
 
   @override
   State<Glass> createState() => _GlassState();
@@ -186,32 +193,37 @@ class _GlassState extends State<Glass> {
   @override
   Widget build(BuildContext context) {
     if (_registry != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _report());
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => widget.blur ? _report() : _registry?.report(this, null),
+      );
     }
     final colors = Theme.of(context).colorScheme;
     final radius = BorderRadius.circular(widget.radius);
+    final surface = DecoratedBox(
+      decoration: BoxDecoration(
+        color: (widget.color ?? colors.surfaceContainer).withValues(
+          alpha: widget.blur
+              ? widget.opacity
+              : math.min(1, widget.opacity + 0.08),
+        ),
+        borderRadius: radius,
+        border: widget.border
+            ? Border.all(color: colors.outlineVariant.withValues(alpha: 0.6))
+            : null,
+      ),
+      child: Material(type: MaterialType.transparency, child: widget.child),
+    );
     return ClipRRect(
       borderRadius: radius,
-      child: BackdropFilter(
-        // Blurs what Flutter itself draws behind. A map drawn by the native
-        // engine lies outside Flutter's scene; it blurs the rectangles the
-        // registry reports.
-        filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: (widget.color ?? colors.surfaceContainer).withValues(
-              alpha: widget.opacity,
+      child: !widget.blur
+          ? surface
+          : BackdropFilter(
+              // Blurs what Flutter itself draws behind. A map drawn by the
+              // native engine lies outside Flutter's scene; it blurs the
+              // rectangles the registry reports.
+              filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+              child: surface,
             ),
-            borderRadius: radius,
-            border: widget.border
-                ? Border.all(
-                    color: colors.outlineVariant.withValues(alpha: 0.6),
-                  )
-                : null,
-          ),
-          child: Material(type: MaterialType.transparency, child: widget.child),
-        ),
-      ),
     );
   }
 }

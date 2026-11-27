@@ -9,6 +9,7 @@ import 'package:latlong2/latlong.dart';
 import '../obd/obd_service.dart';
 import '../obd/obd_widgets.dart';
 import '../offline/offline_map.dart';
+import '../packs/pack_downloads.dart';
 import '../packs/pack_store.dart';
 import '../packs/packs_screen.dart';
 import '../places/photon_geocoder.dart';
@@ -29,6 +30,8 @@ import 'guidance.dart';
 import 'location_sheet.dart';
 import 'point_picker.dart';
 import 'route_controller.dart';
+import 'speed_limit.dart';
+import 'speedometer.dart';
 import 'route_panel.dart';
 import 'routes_screen.dart';
 import 'ui_kit.dart';
@@ -148,7 +151,95 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   bool _tiltRestored = false;
   Size _viewSize = Size.zero;
 
+  // Speed, the limit of the road, and the controls that hide on the move.
+  late final SpeedLimitTracker _speedLimit = SpeedLimitTracker(
+    _route.nearbyEdges,
+  );
+  final _chrome = DriveChrome();
+  Timer? _chromeTimer;
+  Offset? _pointerDownAt;
+  bool _cruising = false;
+
+  // Map downloads: they go on while the "Maps" screen is closed.
+  PackDownloads? _downloads;
+
   void _open(_Section section) => setState(() => _section = section);
+
+  /// A card at the bottom needs the bar and buttons to act on it.
+  bool get _showsCard =>
+      _route.arrival != null ||
+      (!_route.guiding && (_picked != null || _route.active));
+
+  /// The bottom bar and the map buttons are out of the way: the car is
+  /// moving and nothing on screen is waiting for an answer.
+  bool get _chromeHidden =>
+      _section == _Section.navigator &&
+      _pick == null &&
+      !_showsCard &&
+      !_confirmEnd &&
+      _chrome.hidden;
+
+  /// A touch brings the hidden controls back for a few seconds.
+  void _revealChrome() {
+    if (!_chrome.moving) return;
+    final wasHidden = _chromeHidden;
+    _chrome.reveal();
+    _chromeTimer?.cancel();
+    _chromeTimer = Timer(DriveChrome.revealFor, () {
+      _chrome.conceal();
+      _rebuild();
+    });
+    if (wasHidden) setState(() {});
+  }
+
+  /// Speed known right now, km/h.
+  double? get _speedKmh {
+    final fromRoute = _route.speedKmh;
+    if (fromRoute != null) return fromRoute;
+    final mps = _positioning?.estimate?.speedMps;
+    return mps == null ? null : mps * 3.6;
+  }
+
+  /// Driving without guidance began or ended: tilt the map and turn it
+  /// along the way ("3D in a trip" in the settings), then put it back.
+  void _applyCruise() {
+    if (!_map.ready || _map.maxPitch <= 0 || !widget.settings.drive3d) return;
+    final tilted = math.min(tiltedPitch, _map.maxPitch);
+    if (_cruising) {
+      _map.moveCamera(pitch: tilted);
+      // A map that was following the position now also turns with it; a
+      // map the user moved away stays where they left it.
+      if (_locationMode == LocationMode.centered) {
+        _setLocationMode(LocationMode.heading);
+      }
+    } else {
+      _map.moveCamera(pitch: widget.settings.tilted ? tilted : 0);
+    }
+  }
+
+  /// Once per position update: is the car moving, and on what road.
+  void _trackDriving() {
+    final speed = _speedKmh;
+    _chrome.update(speed, DateTime.now());
+    final progress = _route.progress;
+    // Moving without a route: the map still goes 3D, unless switched off.
+    final cruising = _chrome.moving && progress == null;
+    if (cruising != _cruising) {
+      _cruising = cruising;
+      _applyCruise();
+    }
+    final at = progress?.point ?? _route.myPosition;
+    if (at == null || speed == null || speed < 5) {
+      if (!_chrome.moving) _speedLimit.reset();
+      return;
+    }
+    _speedLimit.update(
+      at,
+      progress != null
+          ? _route.routeBearing
+          : _positioning?.estimate?.courseDeg,
+    );
+  }
 
   /// True when "back" has something to close inside this screen.
   bool get _canGoBack =>
@@ -224,6 +315,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     }
     _traffic.addListener(() => widget.settings.traffic = _traffic.source);
     _route.addListener(_onRouteChanged);
+    _speedLimit.addListener(_rebuild);
     _route.trafficSampler = _traffic.sampler;
     _glass.addListener(_rebuild);
     _map.cameraChanges.addListener(_onCameraMoved);
@@ -316,6 +408,9 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   void dispose() {
     _saveCamera?.cancel();
     _confirmEndTimer?.cancel();
+    _chromeTimer?.cancel();
+    _speedLimit.dispose();
+    _downloads?.dispose();
     _pick?.completer.complete(null);
     widget.settings.removeListener(_applyLocationSettings);
     _map.cameraChanges.removeListener(_onCameraMoved);
@@ -391,6 +486,12 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
       widget.settings.drive3d = !widget.settings.drive3d;
       _follow.resume();
       _onRouteChanged();
+      return;
+    }
+    if (_cruising) {
+      // On the move without a route it is the same switch.
+      final on = widget.settings.drive3d = !widget.settings.drive3d;
+      _map.moveCamera(pitch: on ? math.min(tiltedPitch, _map.maxPitch) : 0);
       return;
     }
     final tilt = _map.pitch <= 1;
@@ -620,6 +721,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
       return;
     }
     _updateSimulation();
+    _trackDriving();
     if (!_route.guiding && _confirmEnd) _cancelEnd();
     // Guidance with a fix: the camera sits behind the car.
     final progress = _route.progress;
@@ -763,18 +865,20 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   }
 
   Future<void> _showPacks() async {
-    final store = PackStore(await OfflineMap.packsDirectory());
+    final downloads = _downloads ??= PackDownloads(
+      PackStore(await OfflineMap.packsDirectory()),
+      onInstalled: _loadOffline,
+    )..addListener(_rebuild);
     if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (context) => PacksScreen(
-          store: store,
+          downloads: downloads,
           catalogUrl: widget.settings.catalogUrl,
           onChanged: _loadOffline,
         ),
       ),
     );
-    store.close();
   }
 
   void _showLocation() {
@@ -952,40 +1056,53 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     final narrow = _viewSize.width < 500;
     final side = narrow ? 0.0 : 72.0;
     final showsBanner = _route.guiding && _route.arrival == null;
-    final showsCard =
-        _pick == null &&
-        (_route.arrival != null ||
-            (!_route.guiding && (_picked != null || _route.active)));
-    final buttons = Align(
-      alignment: Alignment.centerRight,
-      child: Padding(
-        padding: EdgeInsets.only(
-          top: narrow && showsBanner ? 170 : 0,
-          bottom: narrow && showsCard ? 270 : 0,
-        ),
-        child: MapButtons(
-          camera: _map,
-          onZoom: _zoom,
-          onToggle3d: _toggle3d,
-          onNorthUp: _northUp,
-          onLocation: _onLocationButton,
-          onLocationDetails: _showLocation,
-          hasFix: status?.estimate != null,
-          mode: _driving
-              ? (_follow.following ? LocationMode.heading : LocationMode.free)
-              : _locationMode,
-          privateArea: status?.privateArea ?? false,
-          tilted: _driving
-              ? widget.settings.drive3d && _map.maxPitch > 0
-              : _tilted,
-        ),
-      ),
+    final showsCard = _pick == null && _showsCard;
+    final hidden = _chromeHidden;
+    final speed = _speedKmh;
+    // The speed is worth showing on the move, and during guidance always.
+    final speedometer =
+        speed != null && !showsCard && (_route.progress != null || speed >= 5)
+        ? Speedometer(speedKmh: speed, limitKmh: _speedLimit.limitKmh)
+        : null;
+    final downloads = _downloads;
+    final Widget buttons = hidden
+        ? const SizedBox.shrink()
+        : Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: EdgeInsets.only(
+                top: narrow && showsBanner ? 170 : 0,
+                bottom: narrow && showsCard ? 270 : 0,
+              ),
+              child: MapButtons(
+                camera: _map,
+                onZoom: _zoom,
+                onToggle3d: _toggle3d,
+                onNorthUp: _northUp,
+                onLocation: _onLocationButton,
+                onLocationDetails: _showLocation,
+                hasFix: status?.estimate != null,
+                mode: _driving
+                    ? (_follow.following
+                          ? LocationMode.heading
+                          : LocationMode.free)
+                    : _locationMode,
+                privateArea: status?.privateArea ?? false,
+                tilted: _driving
+                    ? widget.settings.drive3d && _map.maxPitch > 0
+                    : _tilted,
+              ),
+            ),
+          );
+    final buttonsSlot = AnimatedSwitcher(
+      duration: const Duration(milliseconds: 180),
+      child: KeyedSubtree(key: ValueKey(hidden), child: buttons),
     );
 
     if (pick != null) {
       return [
         const IgnorePointer(child: Center(child: _Crosshair())),
-        buttons,
+        buttonsSlot,
         Align(
           alignment: Alignment.topLeft,
           child: Padding(
@@ -1101,6 +1218,17 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               TrafficChip(controller: _traffic),
+              if (downloads != null && downloads.active)
+                Padding(
+                  padding: const EdgeInsets.only(top: Ui.gap),
+                  child: _GlassButton(
+                    icon: Icons.download,
+                    label: downloads.installing
+                        ? 'Карты: установка'
+                        : 'Карты: ${(downloads.fraction * 100).floor()}%',
+                    onTap: _showPacks,
+                  ),
+                ),
               if (_obd != null)
                 Padding(
                   padding: const EdgeInsets.only(top: Ui.gap),
@@ -1145,6 +1273,11 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
+              if (speedometer != null)
+                Padding(
+                  padding: const EdgeInsets.only(right: Ui.gap),
+                  child: speedometer,
+                ),
               if (_obd != null)
                 Padding(
                   padding: const EdgeInsets.only(right: Ui.gap),
@@ -1160,6 +1293,9 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
             ],
           ),
         )
+      else if (speedometer != null)
+        // Driving without a route: the speed takes the corner.
+        Align(alignment: Alignment.bottomLeft, child: speedometer)
       else if (quick.isNotEmpty)
         // Nothing planned: home and work are one tap away.
         Align(
@@ -1181,7 +1317,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
             ],
           ),
         ),
-      buttons,
+      buttonsSlot,
     ];
   }
 
@@ -1240,6 +1376,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
                   _traffic,
                   _route,
                   _positioning,
+                  _downloads,
                   widget.user.places,
                 ]),
                 builder: (context, _) => LayoutBuilder(
@@ -1249,98 +1386,113 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
                       _applyDrivePadding();
                     }
                     final scene = _scene(context);
-                    return Stack(
-                      children: [
-                        // While another section covers the screen the map is
-                        // not drawn, so typing does not compete with it.
-                        Listener(
-                          key: _mapKey,
-                          onPointerDown: (_) => _userMovedMap(),
-                          onPointerSignal: (_) => _userMovedMap(pan: false),
-                          child: hooks != null
-                              ? hooks.mapView(scene)
-                              : buildMapView(
-                                  visible: onMap,
-                                  controller: _map,
-                                  scene: scene,
-                                  initialCenter:
-                                      widget.settings.center ??
-                                      const LatLng(55.7522, 37.6156),
-                                  initialZoom: widget.settings.zoom ?? 11,
-                                  onLongPress: (point) {
-                                    if (_pick != null) return;
-                                    setState(() {
-                                      _picked = point;
-                                      _pickedLabel = null;
-                                    });
-                                  },
-                                  onCameraChanged: (center, zoom) {
-                                    _saveCamera?.cancel();
-                                    _saveCamera = Timer(
-                                      const Duration(seconds: 1),
-                                      () => widget.settings.saveCamera(
-                                        center,
-                                        zoom,
-                                      ),
-                                    );
-                                  },
-                                ),
-                        ),
-                        if (onMap)
-                          SafeArea(
-                            minimum: const EdgeInsets.all(Ui.gap),
-                            child: Stack(children: _mapOverlay(context)),
+                    // Any touch brings back the controls hidden on the move.
+                    return Listener(
+                      behavior: HitTestBehavior.translucent,
+                      onPointerDown: (_) => _revealChrome(),
+                      child: Stack(
+                        children: [
+                          // While another section covers the screen the map is
+                          // not drawn, so typing does not compete with it.
+                          Listener(
+                            key: _mapKey,
+                            // A tap only brings the controls back; the camera
+                            // stops following once the finger drags the map.
+                            onPointerDown: (e) => _pointerDownAt = e.position,
+                            onPointerMove: (e) {
+                              final down = _pointerDownAt;
+                              if (down != null &&
+                                  (e.position - down).distance > 10) {
+                                _pointerDownAt = null;
+                                _userMovedMap();
+                              }
+                            },
+                            onPointerSignal: (_) => _userMovedMap(pan: false),
+                            child: hooks != null
+                                ? hooks.mapView(scene)
+                                : buildMapView(
+                                    visible: onMap,
+                                    controller: _map,
+                                    scene: scene,
+                                    initialCenter:
+                                        widget.settings.center ??
+                                        const LatLng(55.7522, 37.6156),
+                                    initialZoom: widget.settings.zoom ?? 11,
+                                    onLongPress: (point) {
+                                      if (_pick != null) return;
+                                      setState(() {
+                                        _picked = point;
+                                        _pickedLabel = null;
+                                      });
+                                    },
+                                    onCameraChanged: (center, zoom) {
+                                      _saveCamera?.cancel();
+                                      _saveCamera = Timer(
+                                        const Duration(seconds: 1),
+                                        () => widget.settings.saveCamera(
+                                          center,
+                                          zoom,
+                                        ),
+                                      );
+                                    },
+                                  ),
                           ),
-                        if (_searching)
-                          Positioned.fill(
-                            child: Material(
-                              color: Theme.of(context).colorScheme.surface,
-                              child: SafeArea(
-                                child: SearchPanel(
-                                  database: _places.isEmpty
-                                      ? null
-                                      : _places.first,
-                                  moreDatabases: _places.skip(1).toList(),
-                                  online: _photon,
-                                  near: _searchNear(),
-                                  initialQuery: _initialQuery,
-                                  emptyQuery: _savedPlacesList(),
-                                  onSelected: (r) =>
-                                      _showPoint(r.point, _labelOf(r)),
-                                  onClose: () => _open(_Section.navigator),
+                          if (onMap)
+                            SafeArea(
+                              minimum: const EdgeInsets.all(Ui.gap),
+                              child: Stack(children: _mapOverlay(context)),
+                            ),
+                          if (_searching)
+                            Positioned.fill(
+                              child: Material(
+                                color: Theme.of(context).colorScheme.surface,
+                                child: SafeArea(
+                                  child: SearchPanel(
+                                    database: _places.isEmpty
+                                        ? null
+                                        : _places.first,
+                                    moreDatabases: _places.skip(1).toList(),
+                                    online: _photon,
+                                    near: _searchNear(),
+                                    initialQuery: _initialQuery,
+                                    emptyQuery: _savedPlacesList(),
+                                    onSelected: (r) =>
+                                        _showPoint(r.point, _labelOf(r)),
+                                    onClose: () => _open(_Section.navigator),
+                                  ),
                                 ),
                               ),
                             ),
+                          _sectionPages(
+                            _Section.routes,
+                            _routesNav,
+                            (_) => RoutesScreen(
+                              route: _route,
+                              user: widget.user,
+                              services: this,
+                              files: _files,
+                              tab: _routesTab,
+                              onGo: () => _open(_Section.navigator),
+                            ),
                           ),
-                        _sectionPages(
-                          _Section.routes,
-                          _routesNav,
-                          (_) => RoutesScreen(
-                            route: _route,
-                            user: widget.user,
-                            services: this,
-                            files: _files,
-                            tab: _routesTab,
-                            onGo: () => _open(_Section.navigator),
+                          _sectionPages(
+                            _Section.settings,
+                            _settingsNav,
+                            (_) => SettingsScreen(
+                              settings: widget.settings,
+                              traffic: _traffic,
+                              positioning: _positioning,
+                              obd: _obd,
+                              onOpenPacks: _showPacks,
+                              user: widget.user,
+                              services: this,
+                              files: _files,
+                              canTilt: _map.maxPitch > 0,
+                              onGoToPlace: _goToPlace,
+                            ),
                           ),
-                        ),
-                        _sectionPages(
-                          _Section.settings,
-                          _settingsNav,
-                          (_) => SettingsScreen(
-                            settings: widget.settings,
-                            traffic: _traffic,
-                            positioning: _positioning,
-                            obd: _obd,
-                            onOpenPacks: _showPacks,
-                            user: widget.user,
-                            services: this,
-                            files: _files,
-                            canTilt: _map.maxPitch > 0,
-                            onGoToPlace: _goToPlace,
-                          ),
-                        ),
-                      ],
+                        ],
+                      ),
                     );
                   },
                 ),
@@ -1349,39 +1501,64 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
               // step of its own: the bar gives way to its two buttons.
               bottomNavigationBar: _pick != null
                   ? null
-                  : _FrostedBar(
-                      child: NavigationBar(
-                        backgroundColor: Colors.transparent,
-                        surfaceTintColor: Colors.transparent,
-                        elevation: 0,
-                        height: 64,
-                        selectedIndex: _section.index,
-                        onDestinationSelected: (i) => _open(_Section.values[i]),
-                        destinations: const [
-                          NavigationDestination(
-                            icon: Icon(Icons.search),
-                            label: 'Поиск',
-                          ),
-                          NavigationDestination(
-                            icon: Icon(Icons.navigation_outlined),
-                            selectedIcon: Icon(Icons.navigation),
-                            label: 'Навигатор',
-                          ),
-                          NavigationDestination(
-                            icon: Icon(Icons.alt_route),
-                            label: 'Маршруты',
-                          ),
-                          NavigationDestination(
-                            icon: Icon(Icons.settings_outlined),
-                            selectedIcon: Icon(Icons.settings),
-                            label: 'Настройки',
-                          ),
-                        ],
+                  : _Collapsible(
+                      collapsed: _chromeHidden,
+                      child: _FrostedBar(
+                        child: NavigationBar(
+                          backgroundColor: Colors.transparent,
+                          surfaceTintColor: Colors.transparent,
+                          elevation: 0,
+                          height: 64,
+                          selectedIndex: _section.index,
+                          onDestinationSelected: (i) =>
+                              _open(_Section.values[i]),
+                          destinations: const [
+                            NavigationDestination(
+                              icon: Icon(Icons.search),
+                              label: 'Поиск',
+                            ),
+                            NavigationDestination(
+                              icon: Icon(Icons.navigation_outlined),
+                              selectedIcon: Icon(Icons.navigation),
+                              label: 'Навигатор',
+                            ),
+                            NavigationDestination(
+                              icon: Icon(Icons.alt_route),
+                              label: 'Маршруты',
+                            ),
+                            NavigationDestination(
+                              icon: Icon(Icons.settings_outlined),
+                              selectedIcon: Icon(Icons.settings),
+                              label: 'Настройки',
+                            ),
+                          ],
+                        ),
                       ),
                     ),
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Slides its child down out of sight, giving its height back to the map.
+class _Collapsible extends StatelessWidget {
+  const _Collapsible({required this.collapsed, required this.child});
+
+  final bool collapsed;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRect(
+      child: AnimatedAlign(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+        alignment: Alignment.topCenter,
+        heightFactor: collapsed ? 0 : 1,
+        child: IgnorePointer(ignoring: collapsed, child: child),
       ),
     );
   }
@@ -1589,46 +1766,8 @@ class MapButtons extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // The compass keeps its place while hidden, so the column below
-        // does not jump when it appears.
-        ListenableBuilder(
-          listenable: camera.cameraChanges,
-          builder: (context, _) {
-            final bearing = camera.ready ? camera.bearing : 0.0;
-            final pitch = camera.ready ? camera.pitch : 0.0;
-            final turned = angleDelta(0, bearing).abs() > 0.5;
-            final shown = turned || pitch > 1;
-            // Not built while hidden: a glass surface is blurred by the
-            // map engine wherever it is, visible or not.
-            return Padding(
-              padding: const EdgeInsets.only(bottom: Ui.gap),
-              child: SizedBox(
-                width: 56,
-                height: 56,
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 180),
-                  child: !shown
-                      ? const SizedBox.shrink()
-                      : Glass(
-                          radius: 28,
-                          child: button(
-                            'Повернуть севером вверх',
-                            Transform.rotate(
-                              angle: -bearing * math.pi / 180,
-                              child: Icon(
-                                Icons.navigation,
-                                color: turned ? colors.primary : colors.outline,
-                              ),
-                            ),
-                            onNorthUp,
-                          ),
-                        ),
-                ),
-              ),
-            );
-          },
-        ),
         Glass(
+          blur: false,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1675,8 +1814,44 @@ class MapButtons extends StatelessWidget {
             ],
           ),
         ),
-        // Balances the compass above, keeping the column centred.
-        const SizedBox(height: 56 + Ui.gap),
+        // The compass sits under the buttons and keeps its place while
+        // hidden, so they do not jump when it appears.
+        ListenableBuilder(
+          listenable: camera.cameraChanges,
+          builder: (context, _) {
+            final bearing = camera.ready ? camera.bearing : 0.0;
+            final pitch = camera.ready ? camera.pitch : 0.0;
+            final turned = angleDelta(0, bearing).abs() > 0.5;
+            final shown = turned || pitch > 1;
+            return Padding(
+              padding: const EdgeInsets.only(top: Ui.gap),
+              child: SizedBox(
+                width: 56,
+                height: 56,
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 180),
+                  child: !shown
+                      ? const SizedBox.shrink()
+                      : Glass(
+                          radius: 28,
+                          blur: false,
+                          child: button(
+                            'Повернуть севером вверх',
+                            Transform.rotate(
+                              angle: -bearing * math.pi / 180,
+                              child: Icon(
+                                Icons.navigation,
+                                color: turned ? colors.primary : colors.outline,
+                              ),
+                            ),
+                            onNorthUp,
+                          ),
+                        ),
+                ),
+              ),
+            );
+          },
+        ),
       ],
     );
   }

@@ -239,6 +239,35 @@ class ValhallaClient {
     );
   }
 
+  /// Roads within [radiusM] of [point], both directions of each, with the
+  /// posted speed limit where the map data has one.
+  Future<List<NearbyEdge>> nearbyEdges(
+    LatLng point, {
+    double radiusM = 40,
+    RouteCosting costing = RouteCosting.auto,
+  }) async {
+    final json = await _postAny('locate', {
+      'locations': [
+        {
+          'lat': point.latitude,
+          'lon': point.longitude,
+          'radius': radiusM.round(),
+        },
+      ],
+      'costing': costing.name,
+      'verbose': true,
+    });
+    if (json is! List || json.isEmpty) return const [];
+    final first = json.first;
+    if (first is! Map<String, dynamic>) return const [];
+    final edges = first['edges'];
+    if (edges is! List) return const [];
+    return [
+      for (final e in edges)
+        if (e is Map<String, dynamic>) ?NearbyEdge.tryParse(e),
+    ];
+  }
+
   /// Asks the backend for its version. Throws if it is not reachable.
   Future<ValhallaStatus> status() async =>
       ValhallaStatus.fromJson(await _post('status', const {}));

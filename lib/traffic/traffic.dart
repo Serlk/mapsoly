@@ -116,3 +116,64 @@ class TrafficController extends ChangeNotifier {
     super.dispose();
   }
 }
+
+/// Google's traffic tiles come with its own road network drawn in grey
+/// and beige under the traffic colours; where Google has no traffic data
+/// (most of Russia) that is all there is, and the map turns grey. This
+/// clears every pixel that is not a traffic colour, in place.
+///
+/// [rgba] is straight (not premultiplied) RGBA. Traffic colours are
+/// saturated (green, yellow, red, dark red); the road network is not.
+void keepTrafficColours(Uint8List rgba, {bool premultiply = false}) {
+  for (var i = 0; i + 3 < rgba.length; i += 4) {
+    final a = rgba[i + 3];
+    if (a == 0) continue;
+    final r = rgba[i], g = rgba[i + 1], b = rgba[i + 2];
+    final max = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    final min = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    if (max < 60 || (max - min) * 5 < max * 3) {
+      rgba[i] = rgba[i + 1] = rgba[i + 2] = rgba[i + 3] = 0;
+    } else if (premultiply && a < 255) {
+      rgba[i] = r * a ~/ 255;
+      rgba[i + 1] = g * a ~/ 255;
+      rgba[i + 2] = b * a ~/ 255;
+    }
+  }
+}
+
+/// [keepTrafficColours] for an encoded tile: PNG in, PNG out. Returns the
+/// tile as it was when it cannot be decoded.
+Future<Uint8List> stripGoogleRoads(Uint8List png) async {
+  try {
+    final codec = await ui.instantiateImageCodec(png);
+    final frame = await codec.getNextFrame();
+    final source = frame.image;
+    final width = source.width, height = source.height;
+    final data = await source.toByteData(
+      format: ui.ImageByteFormat.rawStraightRgba,
+    );
+    source.dispose();
+    codec.dispose();
+    if (data == null) return png;
+    final rgba = data.buffer.asUint8List();
+    keepTrafficColours(rgba, premultiply: true);
+    final buffer = await ui.ImmutableBuffer.fromUint8List(rgba);
+    final descriptor = ui.ImageDescriptor.raw(
+      buffer,
+      width: width,
+      height: height,
+      pixelFormat: ui.PixelFormat.rgba8888,
+    );
+    final out = await descriptor.instantiateCodec();
+    final image = (await out.getNextFrame()).image;
+    final encoded = await image.toByteData(format: ui.ImageByteFormat.png);
+    image.dispose();
+    out.dispose();
+    descriptor.dispose();
+    buffer.dispose();
+    return encoded?.buffer.asUint8List() ?? png;
+  } on Object catch (e) {
+    debugPrint('Google traffic tile not filtered: $e');
+    return png;
+  }
+}

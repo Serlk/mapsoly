@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mapsoly/packs/catalog.dart';
+import 'package:mapsoly/packs/pack_downloads.dart';
 import 'package:mapsoly/packs/pack_store.dart';
 
 /// A tiny file server with switchable faults.
@@ -170,6 +171,33 @@ void main() {
       Directory('${root.path}/packs/.downloads/moscow').existsSync(),
       isFalse,
     );
+  });
+
+  test('downloads run without a screen and report when installed', () async {
+    final pack = publish('moscow', content);
+    // Its own store: the manager closes the one it is given.
+    var installed = 0;
+    final downloads = PackDownloads(
+      PackStore(Directory('${root.path}/packs')),
+      onInstalled: () => installed++,
+    );
+    addTearDown(downloads.dispose);
+    var notified = 0;
+    downloads.addListener(() => notified++);
+    expect(downloads.active, isFalse);
+    downloads.start(pack);
+    downloads.start(pack); // a second tap changes nothing
+    expect(downloads.isRunning('moscow'), isTrue);
+    expect(downloads.running.single.id, 'moscow');
+    expect(downloads.progressOf('moscow')!.received, 0);
+    for (var i = 0; i < 200 && downloads.active; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    expect(downloads.active, isFalse);
+    expect(downloads.errorOf('moscow'), isNull);
+    expect(installed, 1);
+    expect(notified, greaterThan(2));
+    expect(store.installed().single.id, 'moscow');
   });
 
   test('a dropped connection is resumed from where it stopped', () async {

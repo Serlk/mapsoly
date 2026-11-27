@@ -73,7 +73,7 @@ class TileRequest {
 /// and have to be recomposed per tile.
 ///
 ///   /osm/{z}/{x}/{y}.png                 OpenStreetMap raster tiles (no pack installed)
-///   /google/{version}/{z}/{x}/{y}.png    Google traffic, proxied with browser headers
+///   /google/{version}/{z}/{x}/{y}.png    Google traffic without Google's own roads
 ///   /yandex/{version}/{z}/{x}/{y}.png    Yandex traffic, reprojected to EPSG:3857
 ///   /packs/{set}/{z}/{x}/{y}.pbf         vector tile from whichever installed pack has it
 class MapTileServer {
@@ -165,7 +165,11 @@ class MapTileServer {
       final r = await client
           .get(upstream, headers: tile.upstreamHeaders)
           .timeout(const Duration(seconds: 15));
-      return r.statusCode == 200 && r.bodyBytes.isNotEmpty ? r.bodyBytes : null;
+      if (r.statusCode != 200 || r.bodyBytes.isEmpty) return null;
+      // Only the traffic itself: Google's grey road network goes.
+      return tile.kind == 'google'
+          ? stripGoogleRoads(r.bodyBytes)
+          : r.bodyBytes;
     }
     final image = await composeYandexTrafficTile(
       client,

@@ -1,9 +1,9 @@
-import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 
 import 'catalog.dart';
+import 'pack_downloads.dart';
 import 'pack_store.dart';
 
 String formatBytes(int bytes) {
@@ -18,18 +18,21 @@ String formatBytes(int bytes) {
 class PacksScreen extends StatefulWidget {
   const PacksScreen({
     super.key,
-    required this.store,
+    required this.downloads,
     required this.catalogUrl,
     required this.onChanged,
   });
 
-  final PackStore store;
+  /// Downloads keep running after this screen is closed.
+  final PackDownloads downloads;
+  PackStore get store => downloads.store;
 
   /// Address of the catalog (the MAPSOLY_CATALOG environment variable
   /// overrides it for testing).
   final String catalogUrl;
 
-  /// Called after a pack was installed or deleted, so the map can reload.
+  /// Called after a pack was deleted, so the map can reload. (An installed
+  /// pack is announced by [downloads].)
   final VoidCallback onChanged;
 
   @override
@@ -42,25 +45,23 @@ class _PacksScreenState extends State<PacksScreen> {
   String? _catalogError;
   bool _loading = false;
 
-  // Downloads running right now, by pack id.
-  final _downloads = <String, PackDownload>{};
-  final _progress = <String, PackProgress>{};
-  final _errors = <String, String>{};
-
   @override
   void initState() {
     super.initState();
     _installed = widget.store.installed();
+    widget.downloads.addListener(_onDownloads);
     _refresh();
   }
 
   @override
   void dispose() {
-    // Leaving the screen pauses downloads; what was received is kept.
-    for (final d in _downloads.values) {
-      d.cancel();
-    }
+    // Downloads go on without the screen.
+    widget.downloads.removeListener(_onDownloads);
     super.dispose();
+  }
+
+  void _onDownloads() {
+    setState(() => _installed = widget.store.installed());
   }
 
   Future<void> _refresh() async {
@@ -85,39 +86,6 @@ class _PacksScreenState extends State<PacksScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
-  }
-
-  void _start(PackInfo pack) {
-    final download = widget.store.download(pack);
-    setState(() {
-      _downloads[pack.id] = download;
-      _errors.remove(pack.id);
-      _progress[pack.id] = PackProgress(
-        widget.store.partialBytes(pack),
-        pack.size,
-      );
-    });
-    download.progress.listen((p) {
-      if (mounted) setState(() => _progress[pack.id] = p);
-    });
-    download.done.then(
-      (_) {
-        if (!mounted) return;
-        setState(() {
-          _downloads.remove(pack.id);
-          _progress.remove(pack.id);
-          _installed = widget.store.installed();
-        });
-        widget.onChanged();
-      },
-      onError: (Object e) {
-        if (!mounted) return;
-        setState(() {
-          _downloads.remove(pack.id);
-          if (e is! PackDownloadCancelled) _errors[pack.id] = '$e';
-        });
-      },
-    );
   }
 
   Future<void> _delete(InstalledPack pack) async {
@@ -150,14 +118,22 @@ class _PacksScreenState extends State<PacksScreen> {
   Widget _catalogTile(PackInfo pack) {
     final theme = Theme.of(context);
     final local = _installed.where((p) => p.id == pack.id).firstOrNull;
-    final download = _downloads[pack.id];
-    final progress = _progress[pack.id];
-    final error = _errors[pack.id];
+    final downloads = widget.downloads;
+    final download = downloads.isRunning(pack.id) ? pack : null;
+    final progress = downloads.progressOf(pack.id);
+    final error = downloads.errorOf(pack.id);
     final partial = download == null ? widget.store.partialBytes(pack) : 0;
     final upToDate = local?.info?.version == pack.version;
 
     final String status;
-    if (download != null && progress != null) {
+    final installing =
+        download != null &&
+        progress != null &&
+        progress.total > 0 &&
+        progress.received >= progress.total;
+    if (installing) {
+      status = 'Проверка и установка…';
+    } else if (download != null && progress != null) {
       status =
           'Загружено ${formatBytes(progress.received)} из '
           '${formatBytes(progress.total)}';
@@ -180,7 +156,7 @@ class _PacksScreenState extends State<PacksScreen> {
       action = IconButton(
         tooltip: 'Приостановить',
         icon: const Icon(Icons.pause),
-        onPressed: download.cancel,
+        onPressed: installing ? null : () => downloads.pause(pack.id),
       );
     } else if (local != null && upToDate) {
       action = IconButton(
@@ -196,7 +172,7 @@ class _PacksScreenState extends State<PacksScreen> {
             ? 'Продолжить загрузку'
             : 'Скачать',
         icon: Icon(local != null ? Icons.update : Icons.download),
-        onPressed: () => _start(pack),
+        onPressed: () => downloads.start(pack),
       );
     }
 
@@ -216,7 +192,9 @@ class _PacksScreenState extends State<PacksScreen> {
         if (download != null && progress != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: LinearProgressIndicator(value: progress.fraction),
+            child: LinearProgressIndicator(
+              value: installing ? null : progress.fraction,
+            ),
           ),
       ],
     );
