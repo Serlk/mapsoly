@@ -7,6 +7,7 @@ class PackFile {
     required this.url,
     required this.size,
     required this.sha256,
+    this.routing = false,
   });
 
   /// Where the file goes inside the pack folder, e.g. `valhalla/tiles.tar`.
@@ -16,6 +17,11 @@ class PackFile {
 
   /// Lower-case hex digest of the whole file.
   final String sha256;
+
+  /// True for a tar of routing graph tiles. Tiles of all installed packs
+  /// come from one country-wide build and are unpacked into one shared
+  /// folder, so routes can cross pack borders.
+  final bool routing;
 
   factory PackFile.fromJson(Map<String, dynamic> json, Uri base) {
     final path = json['path'] as String;
@@ -30,6 +36,7 @@ class PackFile {
       url: base.resolve(json['url'] as String),
       size: json['size'] as int,
       sha256: (json['sha256'] as String).toLowerCase(),
+      routing: json['routing'] == true,
     );
   }
 
@@ -38,6 +45,7 @@ class PackFile {
     'url': url.toString(),
     'size': size,
     'sha256': sha256,
+    if (routing) 'routing': true,
   };
 }
 

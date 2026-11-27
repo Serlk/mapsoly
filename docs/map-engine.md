@@ -34,8 +34,8 @@ The background (why MapLibre, why this way of embedding, measurements) is in
   view transparent (`linux/runner/native_view_plugin.cc`, only on Wayland and not with
   `MAPSOLY_MAP_ENGINE=flutter`). `MapLibreView` clears its rectangle, including the
   scaffold background painted under it, so the map shows through; everything painted
-  later stays on top. Until the first style is loaded it paints the style's land colour
-  instead of a hole.
+  later stays on top. Until the first style is loaded it paints the colour of the
+  style's `background` layer instead of a hole.
 - **Input stays in Flutter.** The subsurface has an empty input region. `MapLibreView` is
   a `Listener`; widgets above it in the stack get their own taps as usual.
   `maplibre/gestures.dart` turns pointer events into camera changes: one-finger pan with
@@ -67,7 +67,10 @@ The background (why MapLibre, why this way of embedding, measurements) is in
   (`composeYandexTrafficTile` in `lib/traffic/yandex_tile_provider.dart`, shared with the
   Flutter engine), `/osm/z/x/y.png` proxies the OSM tiles. The traffic layer is added at
   run time right below the route; on a new version the new layer is added and the old one
-  removed 3 s later.
+  removed 10 s later. For these overlay sources the bridge turns off MapLibre's low-zoom
+  prefetch and allows a parent tile as a stand-in only one level up: otherwise a loading
+  view shows tiles from four levels up stretched over the screen, which on the dark map is
+  a bright flash (`MLNB_OVERLAY_PLACEHOLDERS=1` restores that for comparison).
 - **`visible: false`** unmaps the subsurface and stops rendering; the map and its state stay.
 - **Geometry.** After every layout the widget's rectangle is sent to the bridge
   (subsurface position and size). The device pixel ratio is read from the view; MapLibre
@@ -134,6 +137,7 @@ in other scripts (CJK, Arabic, ...) are not drawn.
 | `MAPSOLY_MAP_FRAMELOG=/path.csv` | one CSV row per rendered map frame; `data/maplibre-build/engine/frames.py` summarises it |
 | `MAPSOLY_MAP_BENCH=/prefix` | 3 s after start, runs the scripted camera of the spike; writes `<prefix>.frames.csv` |
 | `MAPSOLY_MAP_FLIP=<ms>` | switches bright/dark by itself, after `<ms>` and again 80 ms later, repeatedly |
+| `MLNB_OVERLAY_PLACEHOLDERS=1` | MapLibre's default stand-in tiles for the traffic overlay |
 | `MLNB_NO_PIN=1` | do not pin the map thread to the big cores |
 | `MLNB_NO_CRASH_HANDLER=1` | do not install the signal handler |
 
@@ -155,5 +159,7 @@ strip maths. The native bridge and the widget itself are only tested on the devi
 - Hot restart of the Dart code leaks the native map (release builds are not affected).
 - A pack replaced under the same path while the app runs: the style is reloaded, but
   whether MapLibre's PMTiles reader drops what it cached for that file was not checked.
+- At start the screen passes `offline == null` until the pack is opened, so the online
+  raster style is loaded for a moment before the pack's style replaces it.
 - No pitch gesture, no compass button (the controller has `bearing` and `resetNorth()`).
 - Glyphs outside the kept ranges.

@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import 'catalog.dart';
+import 'tar_reader.dart';
 
 /// A pack present on the device.
 class InstalledPack {
@@ -78,6 +79,13 @@ class PackStore {
 
   static const _manifest = 'pack.json';
 
+  /// Tiles a pack put into the shared routing folder, one path per line.
+  static const _routingList = 'routing_tiles.txt';
+
+  /// Routing graph shared by all packs: `valhalla.json`, `build.txt` and
+  /// `tiles/`. Dot-prefixed, so it is not listed as a pack.
+  Directory get sharedRouting => Directory('${root.path}/.shared/valhalla');
+
   Directory get _staging => Directory('${root.path}/.downloads');
 
   Future<PackCatalog> fetchCatalog(Uri url) async {
@@ -134,12 +142,95 @@ class PackStore {
   }
 
   void delete(String id) {
+    final own = _routingTiles(Directory('${root.path}/$id'));
     for (final dir in [
       Directory('${root.path}/$id'),
       Directory('${_staging.path}/$id'),
     ]) {
       if (dir.existsSync()) dir.deleteSync(recursive: true);
     }
+    _dropUnreferencedTiles(own);
+  }
+
+  Set<String> _routingTiles(Directory pack) {
+    final list = File('${pack.path}/$_routingList');
+    return list.existsSync() ? list.readAsLinesSync().toSet() : {};
+  }
+
+  /// Removes shared routing tiles from [candidates] that no installed pack
+  /// lists any more; the last pack going takes the whole graph with it.
+  void _dropUnreferencedTiles(Set<String> candidates) {
+    if (candidates.isEmpty) return;
+    final packs = root.existsSync()
+        ? root.listSync().whereType<Directory>().where(
+            (d) => !d.uri.pathSegments
+                .lastWhere((s) => s.isNotEmpty)
+                .startsWith('.'),
+          )
+        : const <Directory>[];
+    final used = <String>{for (final p in packs) ..._routingTiles(p)};
+    if (used.isEmpty) {
+      if (sharedRouting.existsSync()) sharedRouting.deleteSync(recursive: true);
+      return;
+    }
+    for (final tile in candidates.difference(used)) {
+      final file = File('${sharedRouting.path}/$tile');
+      if (file.existsSync()) file.deleteSync();
+    }
+  }
+
+  /// Unpacks a verified routing tar into the shared folder and returns the
+  /// tiles it contained. Only the expected file names are accepted.
+  ///
+  /// All packs must come from one graph build: tiles of different builds do
+  /// not connect at the seams. When [tar] belongs to another build than the
+  /// tiles already present, the old graph is dropped first (the packs it
+  /// came from keep their maps and get their routing back when updated).
+  Set<String> _installRouting(File tar) {
+    final tilePath = RegExp(r'^tiles/[0-9]+(/[0-9]+)+\.gph$');
+    String clean(String name) =>
+        name.startsWith('./') ? name.substring(2) : name;
+
+    String? build;
+    readTar(tar, (e) {
+      if (clean(e.name) == 'build.txt' && e.size < 256) {
+        final tmp = File('${tar.path}.build');
+        e.extractTo(tmp);
+        build = tmp.readAsStringSync().trim();
+        tmp.deleteSync();
+      }
+    });
+    if (build == null || build!.isEmpty) {
+      throw const PackDownloadException(
+        'В пакете нет сведений о сборке графа маршрутов',
+      );
+    }
+    final shared = sharedRouting;
+    final marker = File('${shared.path}/build.txt');
+    if (marker.existsSync() && marker.readAsStringSync().trim() != build) {
+      shared.deleteSync(recursive: true);
+      for (final pack in root.listSync().whereType<Directory>()) {
+        final list = File('${pack.path}/$_routingList');
+        if (list.existsSync()) list.deleteSync();
+      }
+    }
+    shared.createSync(recursive: true);
+
+    final tiles = <String>{};
+    readTar(tar, (e) {
+      final name = clean(e.name);
+      if (name == 'valhalla.json') {
+        e.extractTo(File('${shared.path}/valhalla.json'));
+      } else if (tilePath.hasMatch(name)) {
+        e.extractTo(File('${shared.path}/$name'));
+        tiles.add(name);
+      }
+    });
+    if (tiles.isEmpty || !File('${shared.path}/valhalla.json').existsSync()) {
+      throw const PackDownloadException('Пакет маршрутов пуст или повреждён');
+    }
+    marker.writeAsStringSync('$build\n');
+    return tiles;
   }
 
   /// Downloads [pack] (resuming partial files), verifies every file and
@@ -182,8 +273,11 @@ class PackStore {
       final part = File('${target.path}.part');
       target.parent.createSync(recursive: true);
 
-      // Already fetched and verified in an earlier attempt.
-      if (!target.existsSync()) {
+      // Already fetched and verified in an earlier attempt (a routing tar
+      // may even be unpacked and gone).
+      final unpacked =
+          file.routing && File('${staging.path}/$_routingList').existsSync();
+      if (!target.existsSync() && !unpacked) {
         var have = part.existsSync() ? part.lengthSync() : 0;
         if (have > file.size) {
           part.deleteSync();
@@ -224,14 +318,30 @@ class PackStore {
       progress.add(PackProgress(before, total, file: file.path));
     }
 
+    // Routing tiles go to the shared graph; the tar itself is not kept.
+    final live = Directory('${root.path}/${pack.id}');
+    final previousTiles = _routingTiles(live);
+    final tiles = <String>{};
+    for (final file in pack.files.where((f) => f.routing)) {
+      final tar = File('${staging.path}/${file.path}');
+      // Absent when an earlier attempt already unpacked it.
+      if (tar.existsSync()) {
+        tiles.addAll(_installRouting(tar));
+        tar.deleteSync();
+        File(
+          '${staging.path}/$_routingList',
+        ).writeAsStringSync('${tiles.join('\n')}\n', mode: FileMode.append);
+      }
+    }
     File(
       '${staging.path}/$_manifest',
     ).writeAsStringSync(jsonEncode(pack.toJson()));
     // Swap in the complete pack; the old version goes only now.
-    final live = Directory('${root.path}/${pack.id}');
     if (live.existsSync()) live.deleteSync(recursive: true);
     root.createSync(recursive: true);
     staging.renameSync(live.path);
+    // Tiles the previous version had and the new one does not.
+    _dropUnreferencedTiles(previousTiles);
     return installed().firstWhere((p) => p.id == pack.id);
   }
 

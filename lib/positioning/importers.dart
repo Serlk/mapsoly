@@ -35,6 +35,11 @@ class ImportResult {
       '$transmitters, written $written)';
 }
 
+/// Field of the first line of a WiGLE CSV file written by this app's own
+/// export: marks a file with one row per transmitter instead of one row per
+/// observation (see [importWigleCsv]).
+const String wigleAggregatedMarker = 'appRelease=mapsoly';
+
 /// Splits one CSV line honouring double quotes ("" escapes a quote).
 List<String> splitCsvLine(String line) {
   final out = <String>[];
@@ -157,6 +162,12 @@ String? wigleCellKey(String mac, RadioType radio) {
 /// Rows with `AccuracyMeters` above [maxFixAccuracyM], zero coordinates or a
 /// `_nomap` SSID are skipped. BT (classic) rows are ignored; BLE rows are
 /// stored as BLE transmitters.
+///
+/// A file written by this app ([wigleAggregatedMarker] in the first line)
+/// has one row per *transmitter*: the coordinates are the estimated
+/// transmitter position and `AccuracyMeters` its uncertainty. Such rows are
+/// stored as they are, without the accuracy limit and without the range
+/// model.
 Future<ImportResult> importWigleCsv(
   LocationDb db,
   Stream<String> lines, {
@@ -166,12 +177,18 @@ Future<ImportResult> importWigleCsv(
 }) async {
   final result = ImportResult();
   final accs = <String, _Acc>{};
+  final direct = <String, TransmitterRecord>{};
+  final stamp = now ?? DateTime.now();
+  var aggregated = false;
   Map<String, int>? col;
   var lineNo = 0;
   await for (final line in lines) {
     lineNo++;
     if (line.isEmpty) continue;
-    if (lineNo == 1 && line.startsWith('WigleWifi')) continue;
+    if (lineNo == 1 && line.startsWith('WigleWifi')) {
+      aggregated = line.split(',').contains(wigleAggregatedMarker);
+      continue;
+    }
     var f = splitCsvLine(line);
     if (col == null) {
       col = {for (var i = 0; i < f.length; i++) f[i].trim(): i};
@@ -212,7 +229,7 @@ Future<ImportResult> importWigleCsv(
         (lat == 0 && lon == 0) ||
         lat.abs() > 90 ||
         lon.abs() > 180 ||
-        fixAcc > maxFixAccuracyM ||
+        (!aggregated && fixAcc > maxFixAccuracyM) ||
         ssid.endsWith('_nomap')) {
       result.skipped++;
       continue;
@@ -252,6 +269,22 @@ Future<ImportResult> importWigleCsv(
       continue;
     }
     final key = '${kind.index}|$id';
+    if (aggregated) {
+      final floor = kind == TransmitterKind.cell
+          ? minCellAccuracyM
+          : minWifiAccuracyM;
+      direct[key] = TransmitterRecord(
+        kind: kind,
+        id: id,
+        lat: lat,
+        lon: lon,
+        accuracyM: fixAcc > floor ? fixAcc : floor,
+        bestSignalDbm: dbm,
+        source: TransmitterSource.wigle,
+        updated: stamp,
+      );
+      continue;
+    }
     (accs[key] ??= _Acc(
       kind,
       lat,
@@ -260,9 +293,16 @@ Future<ImportResult> importWigleCsv(
     if (result.rows % 5000 == 0) await Future<void>.delayed(Duration.zero);
   }
   if (col == null) throw const FormatException('empty WiGLE CSV file');
-  final stamp = now ?? DateTime.now();
-  result.transmitters = accs.length;
+  result.transmitters = accs.length + direct.length;
   final records = <TransmitterRecord>[];
+  for (final r in direct.values) {
+    records.add(r);
+    if (records.length >= 2000) {
+      result.written += db.upsertExternal(records);
+      records.clear();
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
   for (final e in accs.entries) {
     records.add(
       e.value.record(

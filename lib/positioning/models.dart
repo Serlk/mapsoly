@@ -321,3 +321,11 @@ class PositionEstimate {
       '${speedMps == null ? '' : ' v=${speedMps!.toStringAsFixed(1)}m/s'}'
       '${courseDeg == null ? '' : ' crs=${courseDeg!.toStringAsFixed(0)}'})';
 }
+
+/// Privacy hook: returns true when the circle of [radiusM] metres around a
+/// point touches an area where nothing may be recorded or sent out (a
+/// user-defined "safe zone"). A radius of 0 asks about the point itself.
+///
+/// The positioning code does not know where the zones come from; the app
+/// installs the hook (see `PositioningEngine.privacyFilter`).
+typedef PrivacyFilter = bool Function(double lat, double lon, double radiusM);

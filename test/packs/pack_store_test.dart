@@ -306,4 +306,198 @@ void main() {
       throwsFormatException,
     );
   });
+
+  group('shared routing graph', () {
+    /// Builds an uncompressed ustar archive from [files].
+    Uint8List tar(Map<String, List<int>> files) {
+      final out = BytesBuilder();
+      files.forEach((name, data) {
+        final header = Uint8List(512);
+        header.setAll(0, ascii.encode(name));
+        header.setAll(100, ascii.encode('0000644\x00'));
+        header.setAll(
+          124,
+          ascii.encode('${data.length.toRadixString(8).padLeft(11, '0')}\x00'),
+        );
+        header[156] = 0x30;
+        header.setAll(257, ascii.encode('ustar\x00'));
+        out
+          ..add(header)
+          ..add(data)
+          ..add(Uint8List((512 - data.length % 512) % 512));
+      });
+      out.add(Uint8List(1024));
+      return out.toBytes();
+    }
+
+    PackInfo routingPack(
+      String id,
+      Map<String, List<int>> tiles, {
+      String build = 'b1',
+      String version = '1',
+      Map<String, List<int>> extra = const {},
+    }) {
+      final archive = tar({
+        'build.txt': ascii.encode(build),
+        'valhalla.json': ascii.encode('{"mjolnir":{"tile_dir":"tiles"}}'),
+        ...tiles,
+        ...extra,
+      });
+      final map = bytes(1000, id.hashCode & 0xFF);
+      server.files['$id-$version-map'] = map;
+      server.files['$id-$version-routing'] = archive;
+      final catalog = jsonEncode({
+        'format': 1,
+        'packs': [
+          {
+            'id': id,
+            'version': version,
+            'files': [
+              {
+                'path': 'map.pmtiles',
+                'url': '$id-$version-map',
+                'size': map.length,
+                'sha256': sha256.convert(map).toString(),
+              },
+              {
+                'path': 'routing.tar',
+                'url': '$id-$version-routing',
+                'size': archive.length,
+                'sha256': sha256.convert(archive).toString(),
+                'routing': true,
+              },
+            ],
+          },
+        ],
+      });
+      return PackCatalog.parse(catalog, server.base).packs.single;
+    }
+
+    File tile(String name) => File('${root.path}/packs/.shared/valhalla/$name');
+
+    test('tiles of two packs land in one graph; the tar is not kept', () async {
+      final a = await store
+          .download(
+            routingPack('central', {
+              'tiles/2/000/001.gph': [1, 1],
+              'tiles/1/000/007.gph': [7],
+            }),
+          )
+          .done;
+      await store
+          .download(
+            routingPack('volga', {
+              'tiles/2/000/002.gph': [2, 2],
+              'tiles/1/000/007.gph': [7],
+            }),
+          )
+          .done;
+      expect(tile('tiles/2/000/001.gph').readAsBytesSync(), [1, 1]);
+      expect(tile('tiles/2/000/002.gph').existsSync(), isTrue);
+      expect(tile('valhalla.json').existsSync(), isTrue);
+      expect(tile('build.txt').readAsStringSync().trim(), 'b1');
+      expect(File('${a.directory.path}/routing.tar').existsSync(), isFalse);
+      // The shared folder is not listed as a pack.
+      expect(store.installed().map((p) => p.id), ['central', 'volga']);
+    });
+
+    test('deleting a pack keeps tiles another pack still needs', () async {
+      await store
+          .download(
+            routingPack('central', {
+              'tiles/2/000/001.gph': [1],
+              'tiles/1/000/007.gph': [7],
+            }),
+          )
+          .done;
+      await store
+          .download(
+            routingPack('volga', {
+              'tiles/2/000/002.gph': [2],
+              'tiles/1/000/007.gph': [7],
+            }),
+          )
+          .done;
+      store.delete('central');
+      expect(tile('tiles/2/000/001.gph').existsSync(), isFalse);
+      expect(tile('tiles/1/000/007.gph').existsSync(), isTrue);
+      expect(tile('tiles/2/000/002.gph').existsSync(), isTrue);
+      store.delete('volga');
+      expect(
+        Directory('${root.path}/packs/.shared/valhalla').existsSync(),
+        isFalse,
+      );
+    });
+
+    test('a pack from another graph build replaces the old graph', () async {
+      await store
+          .download(
+            routingPack('central', {
+              'tiles/2/000/001.gph': [1],
+            }),
+          )
+          .done;
+      await store
+          .download(
+            routingPack('volga', {
+              'tiles/2/000/002.gph': [2],
+            }, build: 'b2'),
+          )
+          .done;
+      expect(tile('build.txt').readAsStringSync().trim(), 'b2');
+      // Tiles of the old build would not connect to the new ones.
+      expect(tile('tiles/2/000/001.gph').existsSync(), isFalse);
+      expect(tile('tiles/2/000/002.gph').existsSync(), isTrue);
+      // The older pack keeps its map.
+      expect(store.installed().map((p) => p.id), ['central', 'volga']);
+    });
+
+    test('unexpected names in the tar are not written anywhere', () async {
+      await store
+          .download(
+            routingPack(
+              'central',
+              {
+                'tiles/2/000/001.gph': [1],
+              },
+              extra: {
+                '../../escape.gph': [9],
+                '/tmp/mapsoly-abs.gph': [9],
+                'tiles/../../up.gph': [9],
+                'tiles/2/evil.sh': [9],
+                'notes.txt': [9],
+              },
+            ),
+          )
+          .done;
+      final written = Directory('${root.path}/packs/.shared')
+          .listSync(recursive: true)
+          .whereType<File>()
+          .map((f) => f.path.split('.shared/valhalla/').last)
+          .toSet();
+      expect(written, {'build.txt', 'valhalla.json', 'tiles/2/000/001.gph'});
+      expect(File('${root.path}/escape.gph').existsSync(), isFalse);
+      expect(File('/tmp/mapsoly-abs.gph').existsSync(), isFalse);
+    });
+
+    test('an update drops tiles the new version no longer has', () async {
+      await store
+          .download(
+            routingPack('central', {
+              'tiles/2/000/001.gph': [1],
+              'tiles/2/000/009.gph': [9],
+            }),
+          )
+          .done;
+      await store
+          .download(
+            routingPack('central', {
+              'tiles/2/000/001.gph': [5],
+            }, version: '2'),
+          )
+          .done;
+      expect(tile('tiles/2/000/001.gph').readAsBytesSync(), [5]);
+      expect(tile('tiles/2/000/009.gph').existsSync(), isFalse);
+    });
+  });
 }

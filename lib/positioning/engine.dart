@@ -82,6 +82,7 @@ class PositioningStatus {
     this.onlineLookups = false,
     this.onlineError,
     this.wifiCellConflict = false,
+    this.privateArea = false,
   });
 
   final bool running;
@@ -122,6 +123,11 @@ class PositioningStatus {
 
   /// Wi-Fi estimate contradicted the cells and was discarded.
   final bool wifiCellConflict;
+
+  /// The position is (or may be) inside a privacy zone: online lookups are
+  /// paused and the wardriving collector stores nothing. Always false
+  /// without a [PositioningEngine.privacyFilter].
+  final bool privateArea;
 }
 
 /// Positioning engine.
@@ -216,6 +222,49 @@ class PositioningEngine {
 
   /// Last error raised while polling a source (diagnostics), or null.
   String? lastSourceError;
+
+  PrivacyFilter? _privacy;
+
+  /// Privacy hook, settable at any time (null = no restrictions). While it
+  /// reports the position as private:
+  ///  * the wardriving collector stores nothing (checked per observation
+  ///    against the GNSS position it was taken at, with the fix accuracy as
+  ///    the radius);
+  ///  * no automatic online lookup is sent (checked against the fused
+  ///    estimate, the latest radio estimate and the latest GNSS fix, each
+  ///    with its accuracy circle; one of them being private is enough).
+  /// Positioning from the local database is not affected.
+  PrivacyFilter? get privacyFilter => _privacy;
+  set privacyFilter(PrivacyFilter? filter) {
+    _privacy = filter;
+    _collector.privacyFilter = filter;
+    _publishStatus();
+  }
+
+  /// What to assume while a [privacyFilter] is set and the engine has no
+  /// position at all: true = private (no online lookups until a position
+  /// from the local database or GNSS shows otherwise). The app sets this at
+  /// startup when the previous session ended inside a zone; without it a
+  /// cold start at home would send the home transmitters out to find out
+  /// where it is.
+  bool assumePrivateUntilLocated = false;
+
+  /// Whether [privacyFilter] currently forbids recording and lookups.
+  bool get inPrivateArea {
+    final f = _privacy;
+    if (f == null) return false;
+    final current = _current, radio = _radio.best, fix = _lastFix;
+    if (current == null && radio == null) {
+      if (assumePrivateUntilLocated) return true;
+    }
+    if (current != null && f(current.lat, current.lon, current.accuracyM)) {
+      return true;
+    }
+    if (radio != null && f(radio.lat, radio.lon, radio.accuracyM)) return true;
+    return fix != null &&
+        fix.hasPosition &&
+        f(fix.lat!, fix.lon!, fix.accuracyM ?? 0);
+  }
 
   /// Smoothed position at [PositioningConfig.outputInterval].
   Stream<PositionEstimate> get estimates => _estimates.stream;
@@ -354,7 +403,10 @@ class PositioningEngine {
     }
     return r.preloadRegion(
       bounds,
-      seeds: seeds ?? _lastWifi.map((o) => o.bssid),
+      // The current scan is not offered as seeds from a private area.
+      seeds:
+          seeds ??
+          (inPrivateArea ? const <String>[] : _lastWifi.map((o) => o.bssid)),
       maxRequests: maxRequests,
       maxAps: maxAps,
       onProgress: onProgress,
@@ -456,6 +508,8 @@ class PositioningEngine {
   void _maybeResolveOnline() {
     final r = _resolver;
     if (r == null || !_online || _onlineBusy) return;
+    // Every lookup names the transmitters around us: never from a zone.
+    if (inPrivateArea) return;
     final now = _now();
     final last = _lastOnline;
     if (last != null && now.difference(last) < config.onlineMinInterval) {
@@ -472,11 +526,14 @@ class PositioningEngine {
       try {
         var changed = 0;
         if (needWifi) changed += await r.resolveWifi(scan);
-        if (needCells) changed += await r.resolveCells(towers);
+        // The position may have entered a zone while the request was out.
+        if (needCells && !inPrivateArea) {
+          changed += await r.resolveCells(towers);
+        }
         if (_disposed) return;
         if (changed > 0) {
           _afterObservations(wifiChanged: false);
-        } else if (_radio.best == null) {
+        } else if (_radio.best == null && !inPrivateArea) {
           // Nothing cacheable: ask for a one-off fix of the whole scan.
           final fix = await r.geolocate(wifi: scan, cells: towers);
           if (fix != null && !_disposed) _filter.addPosition(fix);
@@ -546,6 +603,7 @@ class PositioningEngine {
       onlineLookups: _online,
       onlineError: _resolver?.lastError,
       wifiCellConflict: _radio.wifiCellConflict,
+      privateArea: inPrivateArea,
     );
     if (!_statuses.isClosed) _statuses.add(_status);
   }

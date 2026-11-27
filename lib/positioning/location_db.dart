@@ -30,6 +30,7 @@ class TransmitterRecord {
     this.weightSum = 0,
     this.scatterM2 = 0,
     this.bestSignalDbm,
+    this.seedSource,
   });
 
   final TransmitterKind kind;
@@ -56,6 +57,21 @@ class TransmitterRecord {
 
   /// Strongest signal ever recorded for this transmitter.
   final double? bestSignalDbm;
+
+  /// For a [TransmitterSource.wardriving] record: the source of the external
+  /// record its running estimate was started from (the external position
+  /// served as a prior worth one sample), or null when the position comes
+  /// from own observations only. Always null for other sources. Records
+  /// written before schema version 2 have null here even if they were
+  /// seeded: that was not stored then.
+  final TransmitterSource? seedSource;
+
+  /// Learnt by own wardriving without a prior from an online service
+  /// (Apple, beaconDB).
+  bool get isOwn =>
+      source == TransmitterSource.wardriving &&
+      seedSource != TransmitterSource.apple &&
+      seedSource != TransmitterSource.beacondb;
 }
 
 /// One wardriving sample to merge into the database.
@@ -182,7 +198,8 @@ class LocationDb {
   final Database _db;
   final String? path;
 
-  static const int schemaVersion = 1;
+  /// 2 added `transmitter.seed_source` (see [TransmitterRecord.seedSource]).
+  static const int schemaVersion = 2;
 
   void _migrate() {
     _db.execute('PRAGMA journal_mode = WAL');
@@ -204,8 +221,17 @@ class LocationDb {
         best_range REAL,              -- smallest estimated range seen, m
         source INTEGER NOT NULL,      -- TransmitterSource.index
         updated INTEGER NOT NULL,     -- unix seconds
+        seed_source INTEGER,          -- external source a wardriving record
+                                      -- was started from, NULL = own only
         PRIMARY KEY(kind, id)
       ) WITHOUT ROWID''');
+    // Version 1 databases have the table without the column.
+    final columns = _db
+        .select('PRAGMA table_info(transmitter)')
+        .map((r) => r['name'] as String);
+    if (!columns.contains('seed_source')) {
+      _db.execute('ALTER TABLE transmitter ADD COLUMN seed_source INTEGER');
+    }
     _db.execute(
       'CREATE INDEX IF NOT EXISTS transmitter_pos ON transmitter(lat, lon)',
     );
@@ -246,7 +272,124 @@ class LocationDb {
       (r['updated'] as int) * 1000,
       isUtc: true,
     ),
+    seedSource: switch (r['seed_source']) {
+      final int i when i >= 0 && i < TransmitterSource.values.length =>
+        TransmitterSource.values[i],
+      _ => null,
+    },
   );
+
+  /// All records in primary-key order, read in pages so a large database is
+  /// never held in memory at once. With [source], only that source.
+  ///
+  /// The database may be written between pages (the iteration is keyset
+  /// based); records changed meanwhile are seen in either state.
+  Iterable<TransmitterRecord> records({
+    TransmitterSource? source,
+    int pageSize = 2000,
+  }) sync* {
+    var kind = -1;
+    var id = '';
+    while (true) {
+      final rows = _db.select(
+        'SELECT * FROM transmitter WHERE (kind > ?1 OR (kind = ?1 AND id > ?2)) '
+        '${source == null ? '' : 'AND source = ?4 '}'
+        'ORDER BY kind, id LIMIT ?3',
+        [kind, id, pageSize, if (source != null) source.index],
+      );
+      if (rows.isEmpty) return;
+      for (final r in rows) {
+        yield _row(r);
+      }
+      kind = rows.last['kind'] as int;
+      id = rows.last['id'] as String;
+      if (rows.length < pageSize) return;
+    }
+  }
+
+  /// Deletes (or with [dryRun] only counts) what lies inside any of
+  /// [circles] (latitude, longitude, radius in metres): transmitter records
+  /// by their stored position and raw wardriving samples by the position
+  /// they were taken at. With [sources], only transmitter records from
+  /// those sources; raw samples are own wardriving data and are included
+  /// when [sources] is null or contains [TransmitterSource.wardriving].
+  ///
+  /// Returns (transmitter records, raw samples); something inside several
+  /// circles is counted once.
+  (int, int) deleteWithin(
+    Iterable<(double, double, double)> circles, {
+    Set<TransmitterSource>? sources,
+    bool dryRun = false,
+  }) {
+    final keys = <(int, String)>{};
+    final sampleRows = <int>{};
+    final withSamples =
+        sources == null || sources.contains(TransmitterSource.wardriving);
+    for (final (lat, lon, radiusM) in circles) {
+      // Bounding box first (uses the position index), exact distance after.
+      final dLat = radToDeg(radiusM / earthRadiusM);
+      final cos = math.cos(degToRad(lat)).abs();
+      final wide = cos < 1e-6 || dLat / cos >= 180;
+      final dLon = wide ? 360.0 : dLat / cos;
+      // Near the antimeridian the box wraps: do not filter by longitude.
+      final wraps = wide || lon - dLon < -180 || lon + dLon > 180;
+      final where =
+          'lat BETWEEN ?1 AND ?2'
+          '${wraps ? '' : ' AND lon BETWEEN ?3 AND ?4'}';
+      final args = [
+        lat - dLat,
+        lat + dLat,
+        if (!wraps) ...[lon - dLon, lon + dLon],
+      ];
+      bool inside(Row r) =>
+          haversineM(
+            lat,
+            lon,
+            (r['lat'] as num).toDouble(),
+            (r['lon'] as num).toDouble(),
+          ) <=
+          radiusM;
+
+      for (final r in _db.select(
+        'SELECT kind, id, lat, lon, source FROM transmitter WHERE $where',
+        args,
+      )) {
+        if (inside(r) &&
+            (sources == null ||
+                sources.any((s) => s.index == r['source'] as int))) {
+          keys.add((r['kind'] as int, r['id'] as String));
+        }
+      }
+      if (withSamples) {
+        for (final r in _db.select(
+          'SELECT rowid AS rid, lat, lon FROM sample WHERE $where',
+          args,
+        )) {
+          if (inside(r)) sampleRows.add(r['rid'] as int);
+        }
+      }
+    }
+    if (!dryRun && (keys.isNotEmpty || sampleRows.isNotEmpty)) {
+      final delT = _db.prepare(
+        'DELETE FROM transmitter WHERE kind = ? AND id = ?',
+      );
+      final delS = _db.prepare('DELETE FROM sample WHERE rowid = ?');
+      try {
+        transaction(() {
+          for (final (kind, id) in keys) {
+            delT.execute([kind, id]);
+          }
+          for (final rid in sampleRows) {
+            delS.execute([rid]);
+          }
+        });
+      } finally {
+        delT.dispose();
+        delS.dispose();
+      }
+    }
+    return (keys.length, sampleRows.length);
+  }
 
   /// Bulk lookup: returns the known records among [ids], keyed by id.
   Map<String, TransmitterRecord> lookup(
@@ -317,7 +460,8 @@ class LocationDb {
         lat = excluded.lat, lon = excluded.lon, accuracy = excluded.accuracy,
         samples = excluded.samples, wsum = excluded.wsum,
         scatter = excluded.scatter, best_signal = excluded.best_signal,
-        source = excluded.source, updated = excluded.updated
+        source = excluded.source, updated = excluded.updated,
+        seed_source = NULL
       WHERE excluded.source <= transmitter.source''');
     final clear = _db.prepare('DELETE FROM unknown WHERE kind = ? AND id = ?');
     var n = 0;
@@ -376,12 +520,12 @@ class LocationDb {
   }) {
     final sel = _db.prepare(
       'SELECT lat, lon, samples, wsum, scatter, best_signal, best_range, '
-      'source FROM transmitter WHERE kind = ? AND id = ?',
+      'source, seed_source FROM transmitter WHERE kind = ? AND id = ?',
     );
     final put = _db.prepare('''
       INSERT OR REPLACE INTO transmitter(kind, id, lat, lon, accuracy, samples,
-        wsum, scatter, best_signal, best_range, source, updated)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''');
+        wsum, scatter, best_signal, best_range, source, updated, seed_source)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''');
     final raw = keepRawSamples
         ? _db.prepare('INSERT INTO sample VALUES(?, ?, ?, ?, ?, ?, ?)')
         : null;
@@ -410,6 +554,8 @@ class LocationDb {
           var scatter = s.weight * s.fixAccuracyM * s.fixAccuracyM;
           var bestSignal = s.signalDbm;
           var bestRange = s.rangeM;
+          // Null unless the estimate continues from an external record.
+          int? seed;
 
           if (rows.isNotEmpty) {
             final r = rows.first;
@@ -425,6 +571,9 @@ class LocationDb {
                 oW = s.weight;
                 oScatter = 0;
                 oN = 1;
+                seed = r['source'] as int;
+              } else {
+                seed = r['seed_source'] as int?;
               }
               final proj = LocalProjection(oLat, oLon);
               final dx = proj.x(s.lon), dy = proj.y(s.lat);
@@ -465,6 +614,7 @@ class LocationDb {
             bestRange,
             TransmitterSource.wardriving.index,
             t,
+            seed,
           ]);
         }
       });

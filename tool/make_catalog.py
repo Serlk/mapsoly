@@ -14,8 +14,22 @@ import os
 import sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
-FILES = ["map.pmtiles", "places.sqlite", "valhalla/tiles.tar", "valhalla/valhalla.json"]
-NAMES = {"moscow": "Москва и Московская область", "kaliningrad": "Калининградская область"}
+# A routing.tar (slice of the country-wide graph) replaces the old per-pack
+# valhalla/ folder when present.
+FILES = ["map.pmtiles", "places.sqlite", "routing.tar", "valhalla/tiles.tar", "valhalla/valhalla.json"]
+NAMES = {
+    "moscow": "Москва и Московская область",
+    "kaliningrad": "Калининградская область",
+    "central": "Центральный округ",
+    "northwestern": "Северо-Западный округ",
+    "south": "Южный округ",
+    "north-caucasus": "Северо-Кавказский округ",
+    "volga": "Приволжский округ",
+    "ural": "Уральский округ",
+    "siberian": "Сибирский округ",
+    "far-eastern": "Дальневосточный округ",
+    "crimean": "Крым",
+}
 
 
 def digest(path):
@@ -35,6 +49,8 @@ def main():
     for name in names:
         src = os.path.join(packs_dir, name)
         present = [f for f in FILES if os.path.isfile(os.path.join(src, f))]
+        if "routing.tar" in present:
+            present = [f for f in present if not f.startswith("valhalla/")]
         if "map.pmtiles" not in present:
             print(f"skip {name}: no map.pmtiles")
             continue
@@ -52,7 +68,10 @@ def main():
                 os.link(path, link)
             except OSError:
                 os.symlink(path, link)
-            files.append({"path": rel, "url": flat, "size": os.path.getsize(path), "sha256": digest(path)})
+            entry_file = {"path": rel, "url": flat, "size": os.path.getsize(path), "sha256": digest(path)}
+            if rel == "routing.tar":
+                entry_file["routing"] = True
+            files.append(entry_file)
             print(f"{name}: {rel} {os.path.getsize(path) / 1e6:.1f} MB")
         entry = {"id": name, "name": NAMES.get(name, name), "version": version, "files": files}
         build = os.path.join(src, "valhalla", "build.json")

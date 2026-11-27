@@ -14,6 +14,7 @@ import '../places/places_database.dart';
 import '../places/search_panel.dart';
 import '../positioning/positioning.dart';
 import '../settings.dart';
+import '../settings_screen.dart';
 import '../traffic/traffic.dart';
 import 'engine/engines.dart';
 import 'engine/map_engine.dart';
@@ -21,6 +22,10 @@ import 'guidance.dart';
 import 'location_sheet.dart';
 import 'route_controller.dart';
 import 'route_panel.dart';
+import 'routes_screen.dart';
+
+/// Sections of the main screen, in the order of the bottom bar.
+enum _Section { search, navigator, routes, settings }
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key, required this.settings});
@@ -45,7 +50,12 @@ class _MapScreenState extends State<MapScreen> {
   final _photon = PhotonGeocoder();
   // Debug hook: MAPSOLY_SEARCH="query" opens search with that text.
   final _initialQuery = Platform.environment['MAPSOLY_SEARCH'] ?? '';
-  late bool _searching = _initialQuery.isNotEmpty;
+  late _Section _section = _initialQuery.isNotEmpty
+      ? _Section.search
+      : _Section.navigator;
+  bool get _searching => _section == _Section.search;
+
+  void _open(_Section section) => setState(() => _section = section);
   PositioningNotifier? _positioning;
   Timer? _simulation;
   bool _demoStarted = false;
@@ -319,7 +329,7 @@ class _MapScreenState extends State<MapScreen> {
   void _onPlaceSelected(PlaceResult place) {
     final context = place.context;
     setState(() {
-      _searching = false;
+      _section = _Section.navigator;
       _picked = place.point;
       _pickedLabel = context == null || context.isEmpty
           ? place.name
@@ -343,12 +353,12 @@ class _MapScreenState extends State<MapScreen> {
           ? const {}
           : {
               const SingleActivator(LogicalKeyboardKey.slash): () =>
-                  setState(() => _searching = true),
+                  _open(_Section.search),
               const SingleActivator(
                 LogicalKeyboardKey.keyF,
                 control: true,
               ): () =>
-                  setState(() => _searching = true),
+                  _open(_Section.search),
               const SingleActivator(LogicalKeyboardKey.keyL): _goToMyPosition,
               const SingleActivator(LogicalKeyboardKey.equal): () => _zoom(1),
               const SingleActivator(LogicalKeyboardKey.add): () => _zoom(1),
@@ -379,7 +389,7 @@ class _MapScreenState extends State<MapScreen> {
                     // While search covers the screen the map is not drawn, so
                     // typing does not compete with map rendering.
                     buildMapView(
-                      visible: !_searching,
+                      visible: _section == _Section.navigator,
                       controller: _map,
                       scene: _scene(context),
                       initialCenter:
@@ -467,14 +477,10 @@ class _MapScreenState extends State<MapScreen> {
                           Align(
                             alignment: Alignment.centerRight,
                             child: _MapButtons(
-                              onSearch: () => setState(() => _searching = true),
-                              onPacks: _showPacks,
                               onMyPosition: _goToMyPosition,
                               onLocationDetails: _showLocation,
                               hasFix: _positioning?.estimate != null,
                               onZoom: _zoom,
-                              themeMode: widget.settings.themeMode,
-                              onCycleTheme: _cycleTheme,
                             ),
                           ),
                         ],
@@ -491,8 +497,30 @@ class _MapScreenState extends State<MapScreen> {
                               near: _searchNear(),
                               initialQuery: _initialQuery,
                               onSelected: _onPlaceSelected,
-                              onClose: () => setState(() => _searching = false),
+                              onClose: () => _open(_Section.navigator),
                             ),
+                          ),
+                        ),
+                      ),
+                    if (_section == _Section.routes ||
+                        _section == _Section.settings)
+                      Positioned.fill(
+                        child: Material(
+                          color: Theme.of(context).colorScheme.surface,
+                          child: SafeArea(
+                            child: _section == _Section.routes
+                                ? RoutesScreen(
+                                    route: _route,
+                                    onShowOnMap: () =>
+                                        _open(_Section.navigator),
+                                    onSearch: () => _open(_Section.search),
+                                  )
+                                : SettingsScreen(
+                                    settings: widget.settings,
+                                    traffic: _traffic,
+                                    positioning: _positioning,
+                                    onOpenPacks: _showPacks,
+                                  ),
                           ),
                         ),
                       ),
@@ -501,84 +529,74 @@ class _MapScreenState extends State<MapScreen> {
               },
             ),
           ),
+          // The main sections sit under the thumb; more can be added here.
+          bottomNavigationBar: NavigationBar(
+            height: 64,
+            selectedIndex: _section.index,
+            onDestinationSelected: (i) => _open(_Section.values[i]),
+            destinations: const [
+              NavigationDestination(icon: Icon(Icons.search), label: 'Поиск'),
+              NavigationDestination(
+                icon: Icon(Icons.navigation_outlined),
+                selectedIcon: Icon(Icons.navigation),
+                label: 'Навигатор',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.alt_route),
+                label: 'Маршруты',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.settings_outlined),
+                selectedIcon: Icon(Icons.settings),
+                label: 'Настройки',
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
+/// Zoom and position buttons on the right edge: few, and large enough to
+/// hit while driving.
 class _MapButtons extends StatelessWidget {
   const _MapButtons({
-    required this.onSearch,
-    required this.onPacks,
     required this.onMyPosition,
     required this.onLocationDetails,
     required this.hasFix,
     required this.onZoom,
-    required this.themeMode,
-    required this.onCycleTheme,
   });
 
-  final VoidCallback onSearch, onPacks, onMyPosition, onLocationDetails;
+  final VoidCallback onMyPosition, onLocationDetails;
   final bool hasFix;
   final void Function(double delta) onZoom;
-  final ThemeMode themeMode;
-  final VoidCallback onCycleTheme;
-
-  static const _themeIcons = {
-    ThemeMode.system: Icons.brightness_auto_outlined,
-    ThemeMode.light: Icons.light_mode_outlined,
-    ThemeMode.dark: Icons.dark_mode_outlined,
-  };
-  static const _themeNames = {
-    ThemeMode.system: 'как в системе',
-    ThemeMode.light: 'светлая',
-    ThemeMode.dark: 'тёмная',
-  };
 
   @override
   Widget build(BuildContext context) {
+    Widget button(String tooltip, IconData icon, VoidCallback onPressed) =>
+        IconButton(
+          tooltip: tooltip,
+          iconSize: 28,
+          constraints: const BoxConstraints.tightFor(width: 56, height: 56),
+          icon: Icon(icon),
+          onPressed: onPressed,
+        );
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          IconButton(
-            tooltip: 'Поиск',
-            icon: const Icon(Icons.search),
-            onPressed: onSearch,
-          ),
-          const SizedBox(width: 24, child: Divider(height: 8)),
-          IconButton(
-            tooltip: 'Приблизить',
-            icon: const Icon(Icons.add),
-            onPressed: () => onZoom(1),
-          ),
-          IconButton(
-            tooltip: 'Отдалить',
-            icon: const Icon(Icons.remove),
-            onPressed: () => onZoom(-1),
-          ),
+          button('Приблизить', Icons.add, () => onZoom(1)),
+          button('Отдалить', Icons.remove, () => onZoom(-1)),
+          const SizedBox(width: 32, child: Divider(height: 8)),
           GestureDetector(
             onLongPress: onLocationDetails,
-            child: IconButton(
-              tooltip: hasFix
-                  ? 'Моё местоположение'
-                  : 'Местоположение не определено',
-              icon: Icon(hasFix ? Icons.my_location : Icons.location_searching),
-              onPressed: onMyPosition,
+            child: button(
+              hasFix ? 'Моё местоположение' : 'Местоположение не определено',
+              hasFix ? Icons.my_location : Icons.location_searching,
+              onMyPosition,
             ),
-          ),
-          IconButton(
-            tooltip: 'Карты для работы без сети',
-            icon: const Icon(Icons.download_for_offline_outlined),
-            onPressed: onPacks,
-          ),
-          const SizedBox(width: 24, child: Divider(height: 8)),
-          IconButton(
-            tooltip: 'Тема: ${_themeNames[themeMode]}',
-            icon: Icon(_themeIcons[themeMode]),
-            onPressed: onCycleTheme,
           ),
         ],
       ),

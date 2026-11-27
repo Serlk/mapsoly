@@ -8,8 +8,7 @@ import 'pack_store.dart';
 
 /// Where the list of downloadable regions comes from unless overridden by
 /// the MAPSOLY_CATALOG environment variable.
-const defaultCatalogUrl =
-    'https://github.com/Serlk/mapsoly/releases/download/packs/catalog.json';
+const defaultCatalogUrl = 'https://mp.srlk-dd.ru/catalog.json';
 
 String formatBytes(int bytes) {
   if (bytes >= 1 << 30) {

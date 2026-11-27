@@ -69,6 +69,22 @@ class WardrivingCollector {
   /// Samples written since creation.
   int samplesWritten = 0;
 
+  /// When set, an observation whose collection position (the GNSS fix, with
+  /// its accuracy as the radius) is private is dropped before anything is
+  /// stored. May be changed at any time; applies to observations from then
+  /// on.
+  PrivacyFilter? privacyFilter;
+
+  /// Observations dropped because of [privacyFilter] since creation.
+  int samplesWithheld = 0;
+
+  bool _private((double, double, double) pos) {
+    final f = privacyFilter;
+    if (f == null || !f(pos.$1, pos.$2, pos.$3)) return false;
+    samplesWithheld++;
+    return true;
+  }
+
   /// Forgets buffered fixes (call when GNSS becomes untrusted).
   void reset() => _fixes.clear();
 
@@ -150,7 +166,7 @@ class WardrivingCollector {
       if (o.optedOut || o.age > config.maxObservationAge) continue;
       final t = now.subtract(o.age);
       final pos = positionAt(t);
-      if (pos == null) continue;
+      if (pos == null || _private(pos)) continue;
       final dbm = o.effectiveDbm;
       if (!_shouldSample('w${o.bssid}', pos.$1, pos.$2, dbm)) continue;
       final range = model.wifiDistanceM(
@@ -182,6 +198,7 @@ class WardrivingCollector {
   int addCells(List<CellObservation> cells, DateTime now) {
     final pos = positionAt(now);
     if (pos == null) return 0;
+    if (cells.isNotEmpty && _private(pos)) return 0;
     final samples = <TransmitterSample>[];
     for (final c in cells) {
       final key = c.key;
@@ -221,7 +238,7 @@ class WardrivingCollector {
       if (id == null) continue;
       final t = now.subtract(o.age);
       final pos = positionAt(t);
-      if (pos == null) continue;
+      if (pos == null || _private(pos)) continue;
       if (!_shouldSample('b$id', pos.$1, pos.$2, o.rssiDbm)) continue;
       // BLE transmits ~10 dB weaker than Wi-Fi.
       final range = model

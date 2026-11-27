@@ -143,11 +143,11 @@ class RoutePanel extends StatelessWidget {
                   ),
                   if (route != null)
                     FilledButton.icon(
-                      style: const ButtonStyle(
-                        visualDensity: VisualDensity.compact,
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(0, 52),
                       ),
                       onPressed: controller.startGuidance,
-                      icon: const Icon(Icons.navigation, size: 18),
+                      icon: const Icon(Icons.navigation, size: 20),
                       label: const Text('Поехали'),
                     ),
                 ],
@@ -299,12 +299,16 @@ class PickedPointCard extends StatelessWidget {
             Row(
               children: [
                 FilledButton.icon(
+                  style: FilledButton.styleFrom(minimumSize: const Size(0, 52)),
                   onPressed: onTo,
                   icon: const Icon(Icons.place),
                   label: const Text('Сюда'),
                 ),
                 const SizedBox(width: 8),
                 OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(0, 52),
+                  ),
                   onPressed: onFrom,
                   icon: const Icon(Icons.trip_origin),
                   label: const Text('Отсюда'),
