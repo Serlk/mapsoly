@@ -23,6 +23,14 @@ static void first_frame_cb(MyApplication* self, FlView* view) {
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
+  // One copy of the app: starting it again lands here, in the copy that is
+  // already running, which brings its window forward instead of opening
+  // another one.
+  GList* windows = gtk_application_get_windows(GTK_APPLICATION(application));
+  if (windows != nullptr) {
+    gtk_window_present(GTK_WINDOW(windows->data));
+    return;
+  }
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
 
@@ -101,9 +109,18 @@ static gboolean my_application_local_command_line(GApplication* application,
 
   g_autoptr(GError) error = nullptr;
   if (!g_application_register(application, nullptr, &error)) {
-    g_warning("Failed to register: %s", error->message);
-    *exit_status = 1;
-    return TRUE;
+    // Being the only copy needs the session bus. Without one (a bare
+    // compositor, a login over ssh) the app still has to start: it then
+    // runs as a copy of its own.
+    g_warning("Not registered as the only copy (%s); starting anyway",
+              error->message);
+    g_clear_error(&error);
+    g_application_set_flags(application, G_APPLICATION_NON_UNIQUE);
+    if (!g_application_register(application, nullptr, &error)) {
+      g_warning("Failed to register: %s", error->message);
+      *exit_status = 1;
+      return TRUE;
+    }
   }
 
   g_application_activate(application);
@@ -155,7 +172,12 @@ MyApplication* my_application_new() {
   // the application to be recognized beyond its binary name.
   g_set_prgname(APPLICATION_ID);
 
+  // A single instance by default: a second start activates the first.
+  // MAPSOLY_NEW_INSTANCE=1 opens a separate copy (development, test runs).
+  const GApplicationFlags flags = g_getenv("MAPSOLY_NEW_INSTANCE") != nullptr
+                                      ? G_APPLICATION_NON_UNIQUE
+                                      : static_cast<GApplicationFlags>(0);
   return MY_APPLICATION(g_object_new(my_application_get_type(),
                                      "application-id", APPLICATION_ID, "flags",
-                                     G_APPLICATION_NON_UNIQUE, nullptr));
+                                     flags, nullptr));
 }

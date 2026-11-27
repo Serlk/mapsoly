@@ -84,7 +84,12 @@ class LocationSheet extends StatelessWidget {
             status.gnssConnected
                 ? 'Спутники: в решении ${status.satellitesUsed} '
                       'из ${status.satellitesInView}'
-                : 'Спутниковый приёмник недоступен',
+                // The app has no link to the receiver at all (its system
+                // service is not running or not open to us): not the same
+                // as a receiver that sees no satellites, which is the line
+                // above with zeros.
+                : 'Нет связи со спутниковым приёмником: системная служба '
+                      'GNSS не запущена или недоступна',
             if (status.spoofingSuspected)
               'Похоже на подмену GPS — спутники не используются',
             if (status.jammingSuspected) 'Похоже на глушение GPS',
