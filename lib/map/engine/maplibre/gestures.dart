@@ -7,7 +7,7 @@ import 'camera.dart';
 /// Turns raw pointer input into camera changes.
 ///
 /// One finger pans (with a fling on release), two fingers pan, pinch-zoom and
-/// rotate, a double tap zooms in, a double tap followed by a vertical drag
+/// rotate, or - moved up or down together - tilt the view; a double tap zooms in, a double tap followed by a vertical drag
 /// zooms continuously, the wheel zooms around the pointer, and holding still
 /// reports a long press. Positions are logical pixels from the view's
 /// top-left corner; time comes in through [advance] and the event calls, so
@@ -17,7 +17,7 @@ class MapGestures {
     required this.camera,
     required this.setCamera,
     required this.onLongPress,
-    required this.viewSize,
+    required this.origin,
     this.onAnimating,
   });
 
@@ -26,7 +26,10 @@ class MapGestures {
   final MapCamera Function() camera;
   final void Function(MapCamera camera, {bool animated}) setCamera;
   final void Function(Offset position) onLongPress;
-  final Size Function() viewSize;
+
+  /// Where the camera target is drawn, from the view's top-left corner (the
+  /// view centre, moved by the camera padding).
+  final Offset Function() origin;
 
   /// Told when a fling starts or ends, so the host can run [advance] from a
   /// ticker only while needed.
@@ -62,11 +65,18 @@ class MapGestures {
   Offset? _centroid;
   double _distance = 0, _angle = 0, _turned = 0;
   bool _rotating = false;
+  // What the two fingers are doing, decided once they moved far enough.
+  bool? _tilting;
+  Offset _twoStart0 = Offset.zero, _twoStart1 = Offset.zero;
   Offset _flingVelocity = Offset.zero;
 
   bool get flinging => _flingVelocity != Offset.zero;
 
-  Offset _fromCenter(Offset p) => p - viewSize().center(Offset.zero);
+  Offset _fromCenter(Offset p) => p - origin();
+
+  /// Two fingers moving up or down together tilt the view by this many
+  /// degrees per pixel.
+  static const pitchPerPixel = 0.35;
 
   void pointerDown(int id, Offset position, double seconds) {
     _stopFling();
@@ -109,6 +119,9 @@ class MapGestures {
     _angle = d.direction;
     _turned = 0;
     _rotating = false;
+    _tilting = null;
+    _twoStart0 = p[0];
+    _twoStart1 = p[1];
   }
 
   void pointerMove(int id, Offset position, double seconds) {
@@ -137,12 +150,13 @@ class MapGestures {
       );
       return;
     }
+    final cam = camera().dragged(_fromCenter(previous), _fromCenter(position));
     if (_consumed) {
       // After a pinch one finger may stay down: it keeps panning.
-      setCamera(camera().panned(position - previous), animated: false);
+      setCamera(cam, animated: false);
       return;
     }
-    setCamera(camera().panned(position - previous), animated: false);
+    setCamera(cam, animated: false);
     _samples.add((seconds, position));
     while (_samples.length > 2 && seconds - _samples.first.$1 > 0.1) {
       _samples.removeAt(0);
@@ -156,7 +170,38 @@ class MapGestures {
     final distance = d.distance;
     var cam = camera();
     final old = _centroid;
-    if (old != null) cam = cam.panned(centroid - old);
+    if (_tilting == null) {
+      // Both fingers went the same way vertically, about equally far, and
+      // hardly sideways: a tilt. Anything else: pan / pinch / rotate.
+      final m0 = p[0] - _twoStart0, m1 = p[1] - _twoStart1;
+      // Pointer events come one finger at a time: wait until both moved (or
+      // one moved far while the other rests, which is no tilt).
+      final least = math.min(m0.distance, m1.distance);
+      final most = math.max(m0.distance, m1.distance);
+      if (most > touchSlop && (least > 4 || most > 3 * touchSlop)) {
+        _tilting =
+            m0.dy * m1.dy > 0 &&
+            m0.dy.abs() > 2 * m0.dx.abs() &&
+            m1.dy.abs() > 2 * m1.dx.abs() &&
+            (m0.dy - m1.dy).abs() < 0.5 * math.max(m0.dy.abs(), m1.dy.abs()) &&
+            p[0].dy - p[1].dy < 150 &&
+            p[1].dy - p[0].dy < 150;
+      }
+    }
+    // Not clear yet what the fingers are doing: nothing moves.
+    if (_tilting == null) return;
+    if (_tilting == true) {
+      if (old != null) {
+        // Fingers up: tilt more (look towards the horizon).
+        cam = cam.withPitch(cam.pitch - (centroid.dy - old.dy) * pitchPerPixel);
+      }
+      _centroid = centroid;
+      _distance = distance;
+      _angle = d.direction;
+      setCamera(cam, animated: false);
+      return;
+    }
+    if (old != null) cam = cam.dragged(_fromCenter(old), _fromCenter(centroid));
     final focal = _fromCenter(centroid);
     if (_distance > 1 && distance > 1) {
       cam = cam.zoomedAround(
@@ -269,7 +314,7 @@ class MapGestures {
     // Distance covered while the speed decays from v to v*k.
     final travelled = _flingVelocity * (flingDecay * (1 - k));
     _flingVelocity = _flingVelocity * k;
-    setCamera(camera().panned(travelled), animated: false);
+    setCamera(camera().dragged(Offset.zero, travelled), animated: false);
     if (_flingVelocity.distance < 20) _stopFling();
   }
 

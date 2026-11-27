@@ -72,6 +72,11 @@ class ValhallaClient {
   /// [costingOptions] goes into `costing_options.<costing>`, e.g.
   /// `{'use_tolls': 0, 'use_highways': 0.5}`.
   ///
+  /// With [stopAtVias] the intermediate locations are stops (`break`): the
+  /// route gets one [RouteLeg] per pair of consecutive locations, each with
+  /// its own summary and its own arrival maneuver. Without it (the default)
+  /// they are passed through without stopping and the legs are joined.
+  ///
   /// Throws [ValhallaException] if Valhalla rejects the request and
   /// [ValhallaUnavailableException] if the backend is unreachable.
   Future<RouteResult> route({
@@ -80,6 +85,7 @@ class ValhallaClient {
     int alternates = 0,
     double? headingDegrees,
     Map<String, dynamic>? costingOptions,
+    bool stopAtVias = false,
   }) async {
     if (locations.length < 2) {
       throw ArgumentError.value(locations, 'locations', 'need at least two');
@@ -92,6 +98,7 @@ class ValhallaClient {
         alternates: alternates,
         headingDegrees: headingDegrees,
         costingOptions: costingOptions,
+        stopAtVias: stopAtVias,
         language: language,
       ),
     );
@@ -109,6 +116,7 @@ class ValhallaClient {
     int alternates = 0,
     double? headingDegrees,
     Map<String, dynamic>? costingOptions,
+    bool stopAtVias = false,
     String language = 'ru-RU',
   }) {
     return {
@@ -117,8 +125,10 @@ class ValhallaClient {
           {
             'lat': locations[i].latitude,
             'lon': locations[i].longitude,
-            // Via points are passed through without a stop.
-            'type': i == 0 || i == locations.length - 1 ? 'break' : 'through',
+            // Via points are stops of their own, or passed through.
+            'type': stopAtVias || i == 0 || i == locations.length - 1
+                ? 'break'
+                : 'through',
             if (i == 0 && headingDegrees != null)
               'heading': headingDegrees.round() % 360,
           },

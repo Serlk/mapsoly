@@ -499,6 +499,7 @@ public:
             glContext.viewport.setDirty();
         }
         lastBlurMs = (monoUs() - t0) / 1000.0;
+        if (!snapshotPath.empty()) writeSnapshot();
         glFlush(); // let the GPU work while we wait
         waitFrame(kFrameWaitMs);
         stalled = frameCallback != nullptr;
@@ -519,7 +520,32 @@ public:
     }
 
     // May a frame be drawn now? Not while the compositor is not taking frames.
-    bool canRender() const { return !stalled || frameCallback == nullptr; }
+    // MLNB_FREERUN=1 (debug): draw even when the compositor takes no frames, e.g. to
+    // write snapshots from a window on a hidden workspace; paced by the bounded wait.
+    bool canRender() const { return !stalled || frameCallback == nullptr || freeRun; }
+    const bool freeRun = std::getenv("MLNB_FREERUN") != nullptr;
+
+    // Debug: the finished frame (as it goes to the compositor) written to a PPM file.
+    std::string snapshotPath;
+    void writeSnapshot() {
+        const int w = static_cast<int>(getSize().width), h = static_cast<int>(getSize().height);
+        std::vector<uint8_t> px(static_cast<std::size_t>(w) * h * 4);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        if (std::FILE* f = std::fopen(snapshotPath.c_str(), "wb")) {
+            std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+            std::vector<uint8_t> row(static_cast<std::size_t>(w) * 3);
+            for (int y = h - 1; y >= 0; --y) { // GL rows are bottom-up
+                const uint8_t* src = px.data() + static_cast<std::size_t>(y) * w * 4;
+                for (int x = 0; x < w; ++x) std::memcpy(&row[x * 3], src + x * 4, 3);
+                std::fwrite(row.data(), 1, row.size(), f);
+            }
+            std::fclose(f);
+        }
+        snapshotPath.clear();
+        static_cast<mln::gl::Context&>(*context).pixelStorePack.setDirty();
+    }
 
     std::vector<BlurRect> blurRects;
     float blurSigma = 0;
@@ -1020,8 +1046,11 @@ void mlnb_set_style_json(mlnb_map* m, const char* json, int64_t generation) {
 }
 
 void mlnb_set_camera(mlnb_map* m, double lat, double lon, double zoom, double bearing, double pitch,
-                     int32_t duration_ms) {
+                     const double* padding_ltrb, int32_t duration_ms, int32_t linear) {
     MLNB_CALL();
+    double pad[4] = {0, 0, 0, 0};
+    const bool hasPadding = padding_ltrb != nullptr;
+    if (hasPadding) std::memcpy(pad, padding_ltrb, sizeof(pad));
     m->post([=] {
         if (m->bench.active()) return;
         mln::CameraOptions c;
@@ -1029,8 +1058,13 @@ void mlnb_set_camera(mlnb_map* m, double lat, double lon, double zoom, double be
         if (!std::isnan(zoom)) c.withZoom(zoom);
         if (!std::isnan(bearing)) c.withBearing(bearing);
         if (!std::isnan(pitch)) c.withPitch(pitch);
+        // mln::EdgeInsets is top, left, bottom, right.
+        if (hasPadding) c.withPadding(mln::EdgeInsets{pad[1], pad[0], pad[3], pad[2]});
         if (duration_ms > 0) {
-            m->map->easeTo(c, mln::AnimationOptions(mln::Milliseconds(duration_ms)));
+            mln::AnimationOptions anim{mln::Duration(mln::Milliseconds(duration_ms))};
+            // Constant speed: a stream of updates then blends into one motion.
+            if (linear) anim.easing.emplace(0.0, 0.0, 1.0, 1.0);
+            m->map->easeTo(c, anim);
         } else {
             m->map->jumpTo(c);
         }
@@ -1130,6 +1164,16 @@ void mlnb_set_blur(mlnb_map* m, const float* xywh, int32_t count, float sigma) {
     m->post([m, rects = std::move(rects), sigma] {
         m->backend->blurRects = rects;
         m->backend->blurSigma = sigma;
+        m->dirty = true;
+        m->map->triggerRepaint();
+    });
+}
+
+void mlnb_snapshot(mlnb_map* m, const char* ppm_path) {
+    MLNB_CALL();
+    std::string p = ppm_path ? ppm_path : "";
+    m->post([m, p = std::move(p)] {
+        m->backend->snapshotPath = p;
         m->dirty = true;
         m->map->triggerRepaint();
     });

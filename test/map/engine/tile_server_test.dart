@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mapsoly/offline/pmtiles.dart';
 import 'package:mapsoly/map/engine/maplibre/tile_server.dart';
 import 'package:mapsoly/traffic/traffic.dart';
 import 'package:mapsoly/traffic/yandex_tile_provider.dart';
@@ -44,6 +47,17 @@ void main() {
       expect(t.upstream, isNull);
     });
 
+    test('packs: vector tiles of a pack set', () {
+      final t = TileRequest.parse('/packs/set3/14/9905/5121.pbf')!;
+      expect(
+        (t.kind, t.version, t.z, t.x, t.y),
+        ('packs', 'set3', 14, 9905, 5121),
+      );
+      expect(t.upstream, isNull);
+      expect(TileRequest.parse('/packs/set3/14/9905/5121.png'), isNull);
+      expect(TileRequest.parse('/osm/1/0/0.pbf'), isNull);
+    });
+
     test('rejects everything else', () {
       for (final p in [
         '/',
@@ -62,6 +76,43 @@ void main() {
       ]) {
         expect(TileRequest.parse(p), isNull, reason: p);
       }
+    });
+  });
+
+  group('several packs as one tile set', () {
+    // Monaco is at tile 8529/5974 (z14): the fixture has it, nothing near Moscow.
+    late PmTilesArchive monaco, again;
+    setUp(() {
+      monaco = PmTilesArchive.open('test/fixtures/monaco.pmtiles');
+      again = PmTilesArchive.open('test/fixtures/monaco.pmtiles');
+    });
+    tearDown(() {
+      monaco.close();
+      again.close();
+    });
+
+    test('a tile comes from the first pack that has it, as stored', () {
+      final hit = tileFromPacks([monaco, again], 14, 8529, 5974)!;
+      expect(hit.gzipped, monaco.tilesGzipped);
+      final plain = hit.gzipped ? gzip.decode(hit.bytes) : hit.bytes;
+      expect(plain, monaco.tile(14, 8529, 5974));
+      expect(hit.bytes, monaco.storedTile(14, 8529, 5974));
+    });
+
+    test('no pack has the tile', () {
+      expect(tileFromPacks([monaco, again], 14, 9905, 5121), isNull);
+      expect(tileFromPacks(const [], 14, 8529, 5974), isNull);
+      expect(
+        tileFromPacks([monaco], 15, 17058, 11948),
+        isNull,
+      ); // above maxZoom
+    });
+
+    test('zoom range is the union', () {
+      expect(zoomRangeOfPacks([monaco, again]), (
+        min: monaco.minZoom,
+        max: monaco.maxZoom,
+      ));
     });
   });
 

@@ -133,6 +133,79 @@ void main() {
     }
   });
 
+  test('extruded buildings: below the route, coloured per style', () {
+    for (final name in ['bright', 'dark']) {
+      final style =
+          jsonDecode(
+                buildVectorStyle(
+                  bundledStyleJson: File(
+                    'assets/styles/$name.json',
+                  ).readAsStringSync(),
+                  name: name,
+                  pmtilesPath: '/p',
+                  buildings3d: true,
+                  assetsDir: '/a',
+                  colors: _colors,
+                ),
+              )
+              as Map<String, dynamic>;
+      final ids = _ids(style);
+      final at = ids.indexOf(MapIds.buildings3d);
+      expect(at, ids.indexOf(MapIds.firstOverlayLayer) - 1);
+      final layer = (style['layers'] as List)[at] as Map;
+      expect(layer['type'], 'fill-extrusion');
+      expect(layer['source-layer'], 'building');
+      expect(layer['paint']['fill-extrusion-height'], ['get', 'render_height']);
+      expect(
+        layer['paint']['fill-extrusion-color'],
+        matches(RegExp(r'^#[0-9a-f]{6}$')),
+      );
+      // Off by default.
+      expect(_ids(_vector(name)), isNot(contains(MapIds.buildings3d)));
+    }
+    // Dark: a little lighter than the flat buildings of that style.
+    expect(
+      buildingsColor('dark', {
+        'layers': [
+          {
+            'type': 'fill',
+            'source-layer': 'building',
+            'paint': {'fill-color': '#202830'},
+          },
+        ],
+      }),
+      '#3c444c',
+    );
+    expect(buildingsColor('bright', {'layers': []}), '#d6d1ca');
+  });
+
+  test('several packs: tiles by URL template with the zoom range', () {
+    final style =
+        jsonDecode(
+              buildVectorStyle(
+                bundledStyleJson: File(
+                  'assets/styles/bright.json',
+                ).readAsStringSync(),
+                name: 'bright',
+                tiles: const VectorTiles(
+                  'http://127.0.0.1:4242/packs/set1/{z}/{x}/{y}.pbf',
+                  0,
+                  14,
+                ),
+                assetsDir: '/a',
+                colors: _colors,
+              ),
+            )
+            as Map<String, dynamic>;
+    expect(style['sources']['openmaptiles'], {
+      'type': 'vector',
+      'tiles': ['http://127.0.0.1:4242/packs/set1/{z}/{x}/{y}.pbf'],
+      'minzoom': 0,
+      'maxzoom': 14,
+    });
+    expect(_ids(style), contains('mapsoly-route'));
+  });
+
   test('background colour is read from the style', () {
     String style(Object? color) => jsonEncode({
       'layers': [

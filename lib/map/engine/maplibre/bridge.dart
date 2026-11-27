@@ -23,10 +23,11 @@ class MapLibreBridge {
       _addImage = lib.lookupFunction<_ImageC, _ImageD>('mlnb_add_image'),
       _setBlur = lib.lookupFunction<_BlurC, _BlurD>('mlnb_set_blur'),
       _frameLog = lib.lookupFunction<_Str1C, _Str1D>('mlnb_frame_log'),
+      _snapshot = lib.lookupFunction<_Str1C, _Str1D>('mlnb_snapshot'),
       _benchStart = lib.lookupFunction<_Str1C, _Str1D>('mlnb_bench_start'),
       _getStats = lib.lookupFunction<_StatsC, _StatsD>('mlnb_get_stats');
 
-  static const abiVersion = 4;
+  static const abiVersion = 6;
   static const eventStyleLoaded = 1;
   static const eventStyleFailed = 2;
   static const eventBenchDone = 3;
@@ -92,6 +93,7 @@ class MapLibreBridge {
   final _ImageD _addImage;
   final _BlurD _setBlur;
   final _Str1D _frameLog;
+  final _Str1D _snapshot;
   final _Str1D _benchStart;
   final _StatsD _getStats;
 
@@ -165,14 +167,38 @@ class MapLibreBridge {
   void setStyle(Pointer<Void> map, String json, int generation) =>
       _with1(json, (p) => _setStyle(map, p, generation));
 
+  /// [padding]: left, top, right, bottom insets in logical pixels.
   void setCamera(
     Pointer<Void> map, {
     required double lat,
     required double lon,
     required double zoom,
     required double bearing,
+    required double pitch,
+    required List<double> padding,
     int durationMs = 0,
-  }) => _setCamera(map, lat, lon, zoom, bearing, double.nan, durationMs);
+    bool linear = false,
+  }) {
+    final p = _malloc(32).cast<Double>();
+    try {
+      for (var i = 0; i < 4; i++) {
+        p[i] = padding[i];
+      }
+      _setCamera(
+        map,
+        lat,
+        lon,
+        zoom,
+        bearing,
+        pitch,
+        p,
+        durationMs,
+        linear ? 1 : 0,
+      );
+    } finally {
+      _free(p.cast());
+    }
+  }
 
   void addSource(Pointer<Void> map, String id, String json) =>
       _with2(id, json, (a, b) => _addSource(map, a, b));
@@ -218,6 +244,10 @@ class MapLibreBridge {
       _free(p.cast());
     }
   }
+
+  /// Debug: the next frame, as it goes to the compositor, as a PPM file.
+  void snapshot(Pointer<Void> map, String path) =>
+      _with1(path, (a) => _snapshot(map, a));
 
   void frameLog(Pointer<Void> map, String path) =>
       _with1(path, (a) => _frameLog(map, a));
@@ -271,9 +301,29 @@ typedef _IntD = void Function(Pointer<Void>, int);
 typedef _StyleC = Void Function(Pointer<Void>, Pointer<Uint8>, Int64);
 typedef _StyleD = void Function(Pointer<Void>, Pointer<Uint8>, int);
 typedef _CamC =
-    Void Function(Pointer<Void>, Double, Double, Double, Double, Double, Int32);
+    Void Function(
+      Pointer<Void>,
+      Double,
+      Double,
+      Double,
+      Double,
+      Double,
+      Pointer<Double>,
+      Int32,
+      Int32,
+    );
 typedef _CamD =
-    void Function(Pointer<Void>, double, double, double, double, double, int);
+    void Function(
+      Pointer<Void>,
+      double,
+      double,
+      double,
+      double,
+      double,
+      Pointer<Double>,
+      int,
+      int,
+    );
 typedef _Str1C = Void Function(Pointer<Void>, Pointer<Uint8>);
 typedef _Str1D = void Function(Pointer<Void>, Pointer<Uint8>);
 typedef _Str2C = Void Function(Pointer<Void>, Pointer<Uint8>, Pointer<Uint8>);

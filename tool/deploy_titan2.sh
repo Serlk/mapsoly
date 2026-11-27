@@ -11,12 +11,14 @@ cd "$(dirname "$0")/.."
 # into linux/prebuilt/, which the phone's CMake build puts into the bundle. Without
 # them the app still works, with the Flutter map engine.
 if [ -f data/maplibre-build/build-gl/libmbgl-core.a ] && [ -d data/maplibre-assets/fonts ]; then
-  tool/build_maplibre.sh
+  tool/build_maplibre.sh phone
+  tool/build_maplibre.sh assets
 else
   echo "warning: MapLibre not built (see docs/map-engine.md); the app will use the Flutter map engine"
 fi
 tar czf - --exclude=./build --exclude=./.dart_tool --exclude=./android \
-  --exclude=./.git --exclude=./linux/flutter/ephemeral --exclude=./data --exclude=./spike . |
+  --exclude=./.git --exclude=./linux/flutter/ephemeral --exclude=./data --exclude=./spike \
+  --exclude=./linux/prebuilt/x86_64 . |
   ssh -i "$KEY" "$HOST" "mkdir -p $DEST && tar xzf - -C $DEST && chown -R serlk:serlk $DEST &&
     su serlk -c 'cd $DEST && flutter --suppress-analytics build linux --release'"
 # The routing backend is a separate small binary (see lib/routing/native/).

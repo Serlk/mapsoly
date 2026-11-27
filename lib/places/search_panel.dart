@@ -100,6 +100,8 @@ class SearchPanel extends StatefulWidget {
     this.onClose,
     this.online,
     this.near,
+    this.moreDatabases = const [],
+    this.emptyQuery,
     this.initialQuery = '',
     this.autofocus = true,
     this.limit = 20,
@@ -108,6 +110,14 @@ class SearchPanel extends StatefulWidget {
 
   /// Installed region pack, or null when none is installed.
   final PlacesDatabase? database;
+
+  /// Further installed region packs: their results are merged with those
+  /// of [database], best score first.
+  final List<PlacesDatabase> moreDatabases;
+
+  /// Shown instead of the (empty) result list while the query is empty,
+  /// e.g. the user's saved places.
+  final Widget? emptyQuery;
 
   /// Online fallback; null disables it.
   final PhotonGeocoder? online;
@@ -179,6 +189,20 @@ class _SearchPanelState extends State<SearchPanel> {
       } catch (_) {
         results = const []; // damaged pack: behave as "nothing found"
       }
+    }
+    if (q.isNotEmpty && widget.moreDatabases.isNotEmpty) {
+      final merged = [...results];
+      for (final more in widget.moreDatabases) {
+        try {
+          merged.addAll(
+            more.search(query, near: widget.near, limit: widget.limit),
+          );
+        } catch (_) {
+          continue; // damaged pack: the others still answer
+        }
+      }
+      merged.sort((a, b) => b.score.compareTo(a.score));
+      results = merged.take(widget.limit).toList();
     }
     _results = results;
     _highlight = 0;
@@ -355,18 +379,21 @@ class _SearchPanelState extends State<SearchPanel> {
                 ],
               ),
             ),
-          Expanded(
-            child: ListView.builder(
-              controller: _scroll,
-              itemExtent: _rowHeight,
-              itemCount: _results.length,
-              itemBuilder: (context, i) => _ResultRow(
-                result: _results[i],
-                highlighted: i == _highlight,
-                onTap: () => _select(i),
+          if (_text.text.trim().isEmpty && widget.emptyQuery != null)
+            Expanded(child: widget.emptyQuery!)
+          else
+            Expanded(
+              child: ListView.builder(
+                controller: _scroll,
+                itemExtent: _rowHeight,
+                itemCount: _results.length,
+                itemBuilder: (context, i) => _ResultRow(
+                  result: _results[i],
+                  highlighted: i == _highlight,
+                  onTap: () => _select(i),
+                ),
               ),
             ),
-          ),
         ],
       ),
     );

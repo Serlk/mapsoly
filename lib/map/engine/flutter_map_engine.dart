@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -12,6 +14,21 @@ import 'map_engine.dart';
 class FlutterMapViewController implements MapViewController {
   final MapController _map = MapController();
   bool _ready = false;
+  final _changes = _CameraChanges();
+  StreamSubscription<MapEvent>? _events;
+  DateTime _lastNotified = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Called by the view once the map exists.
+  void _attach() {
+    _ready = true;
+    _events ??= _map.mapEventStream.listen((_) {
+      // At most ~30 notifications a second.
+      final now = DateTime.now();
+      if (now.difference(_lastNotified).inMilliseconds < 33) return;
+      _lastNotified = now;
+      _changes.notify();
+    });
+  }
 
   @override
   bool get ready => _ready;
@@ -22,14 +39,51 @@ class FlutterMapViewController implements MapViewController {
   @override
   double get zoom => _map.camera.zoom;
 
+  // flutter_map turns the map clockwise by `rotation`: the direction that is
+  // up on screen is then the opposite angle.
   @override
-  double get bearing => _map.camera.rotation;
+  double get bearing {
+    var b = -_map.camera.rotation % 360;
+    if (b > 180) b -= 360;
+    return b;
+  }
 
   @override
   void resetNorth() => _map.rotate(0);
 
+  /// This engine draws flat: no tilt.
+  @override
+  double get pitch => 0;
+
+  @override
+  double get maxPitch => 0;
+
   @override
   void move(LatLng center, double zoom) => _map.move(center, zoom);
+
+  /// Jumps (this engine does not animate); [pitch] is ignored.
+  @override
+  void moveCamera({
+    LatLng? center,
+    double? zoom,
+    double? bearing,
+    double? pitch,
+    Duration? duration,
+  }) {
+    final camera = _map.camera;
+    _map.moveAndRotate(
+      center ?? camera.center,
+      zoom ?? camera.zoom,
+      bearing == null ? camera.rotation : -bearing,
+    );
+  }
+
+  /// Not supported here: the camera target stays at the view centre.
+  @override
+  void setPadding(EdgeInsets padding) {}
+
+  @override
+  Listenable get cameraChanges => _changes;
 
   @override
   void fit(List<LatLng> points, EdgeInsets padding) => _map.fitCamera(
@@ -47,7 +101,15 @@ class FlutterMapViewController implements MapViewController {
   }
 
   @override
-  void dispose() => _map.dispose();
+  void dispose() {
+    _events?.cancel();
+    _changes.dispose();
+    _map.dispose();
+  }
+}
+
+class _CameraChanges extends ChangeNotifier {
+  void notify() => notifyListeners();
 }
 
 /// The map drawn inside Flutter: vector tiles rasterised by Skia, with the
@@ -216,7 +278,7 @@ class FlutterMapView extends StatelessWidget {
       options: MapOptions(
         initialCenter: initialCenter,
         initialZoom: initialZoom,
-        onMapReady: () => controller._ready = true,
+        onMapReady: controller._attach,
         onLongPress: (_, point) => onLongPress(point),
         onPositionChanged: (camera, _) =>
             onCameraChanged(camera.center, camera.zoom),

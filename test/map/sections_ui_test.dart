@@ -1,21 +1,25 @@
-import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
-import 'package:flutter/material.dart' hide Route;
+import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:mapsoly/map/route_controller.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:mapsoly/obd/obd_service.dart';
 import 'package:mapsoly/obd/obd_widgets.dart';
-import 'package:mapsoly/map/routes_screen.dart';
-import 'package:mapsoly/routing/valhalla_client.dart';
 import 'package:mapsoly/settings.dart';
 import 'package:mapsoly/settings_screen.dart';
 import 'package:mapsoly/traffic/traffic.dart';
+import 'package:mapsoly/user/file_exchange.dart';
+import 'package:mapsoly/user/privacy_zones.dart';
+import 'package:mapsoly/user/user_data.dart';
+import 'package:mapsoly/user/user_places.dart';
+
+import 'package:mapsoly/map/ui_kit.dart';
 
 import '../obd/fake_elm.dart';
+import '../ui_shots.dart';
 
 /// Renders the settings and routes sections above a bottom bar at the Titan
 /// 2's window size and fails on layout overflow. With `UI_SHOTS=dir` it
@@ -97,61 +101,135 @@ void main() {
     });
   }
 
-  testWidgets('settings section', (tester) async {
-    final settings = await tester.runAsync(AppSettings.load);
+  testWidgets('settings: a short first screen, the rest one level down', (
+    tester,
+  ) async {
+    final settings = (await tester.runAsync(AppSettings.load))!;
     final traffic = TrafficController();
     addTearDown(traffic.dispose);
-    final screen = SettingsScreen(
-      settings: settings!,
-      traffic: traffic,
-      positioning: null,
-      obd: null,
-      onOpenPacks: () {},
+    final user = UserData.inMemory();
+    user.places
+      ..save(
+        SavedPlace(
+          name: 'Дом',
+          kind: SavedPlaceKind.home,
+          point: const LatLng(59.9390, 30.3158),
+        ),
+      )
+      ..save(SavedPlace(name: 'Дача', point: const LatLng(60.02, 30.6)));
+    user.zones.add(
+      PrivacyZone(
+        name: 'Дом',
+        center: const LatLng(59.9390, 30.3158),
+        radiusM: 300,
+      ),
     );
-    await show(tester, 'settings', screen, 3);
-    expect(find.text('Оформление'), findsOneWidget);
-    expect(find.text('Карты для работы без сети'), findsOneWidget);
-    // Every tappable row is at least 56 px tall.
+    final home = Directory.systemTemp.createTempSync('mapsoly_settings');
+    addTearDown(() => home.deleteSync(recursive: true));
+    final obd = ObdService(logDirectory: Directory.systemTemp);
+    addTearDown(obd.dispose);
+    Widget screen() => Navigator(
+      onGenerateRoute: (_) => MaterialPageRoute<void>(
+        builder: (_) => SettingsScreen(
+          settings: settings,
+          traffic: traffic,
+          positioning: null,
+          obd: obd,
+          onOpenPacks: () {},
+          user: user,
+          services: FakeMapServices(),
+          files: DesktopFileExchange(home: home),
+          canTilt: true,
+        ),
+      ),
+    );
+    await shoot(tester, 'settings', screen(), tab: 3);
+    // The blocks, in their order.
+    const blocks = [
+      'Оформление',
+      'Пробки',
+      'Карты',
+      'Мои места',
+      'Местоположение',
+      'Безопасные зоны',
+      'Автомобиль',
+      'Данные',
+    ];
+    final list = find.byType(Scrollable).first;
+    final rows =
+        (tester.widget<ListView>(find.byType(ListView).first).childrenDelegate
+                as SliverChildListDelegate)
+            .children;
+    expect(rows.whereType<SectionHeader>().map((h) => h.text), blocks);
+    await tester.scrollUntilVisible(
+      find.text('Файлы и собранные данные'),
+      80,
+      scrollable: list,
+    );
+    await snap(tester, 'settings_bottom');
+    expect(find.text('Дом, 1 место'), findsOneWidget);
+    expect(find.text('1 зона'), findsOneWidget);
+    // Every tappable row is finger-sized.
     for (final element in find.byType(ListTile).evaluate()) {
-      expect(element.size!.height, greaterThanOrEqualTo(56));
+      expect(element.size!.height, greaterThanOrEqualTo(64));
     }
-    await show(tester, 'settings_dark', screen, 3, brightness: Brightness.dark);
-  });
-
-  testWidgets('routes section without and with a route', (tester) async {
-    final empty = RouteController();
-    addTearDown(empty.dispose);
-    await show(
-      tester,
-      'routes_empty',
-      RoutesScreen(route: empty, onShowOnMap: () {}, onSearch: () {}),
-      2,
+    // The existing controls still work.
+    await tester.drag(list, const Offset(0, 2000));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Тёмная'));
+    expect(settings.themeMode, ThemeMode.dark);
+    settings.themeMode = ThemeMode.system;
+    await tester.tap(find.text('Яндекс'));
+    expect(traffic.source, TrafficSource.yandex);
+    traffic.select(TrafficSource.off);
+    expect(
+      tester.getSize(find.byType(SegmentedButton<ThemeMode>)).height,
+      greaterThanOrEqualTo(56),
     );
-    expect(find.text('Маршрут не задан'), findsOneWidget);
-
-    final routes = RouteResult.fromJson(
-      jsonDecode(
-            File(
-              'test/routing/fixtures/route_auto_alternates.json',
-            ).readAsStringSync(),
-          )
-          as Map<String, dynamic>,
-    ).routes;
-    final planned = RouteController()
-      ..debugSetRoutes(
-        routes,
-        from: routes.first.shape.first,
-        to: routes.first.shape.last,
-      );
-    addTearDown(planned.dispose);
-    await show(
-      tester,
-      'routes_planned',
-      RoutesScreen(route: planned, onShowOnMap: () {}, onSearch: () {}),
-      2,
+    final was = settings.drive3d;
+    await tester.scrollUntilVisible(
+      find.text('Объёмная карта в поездке'),
+      80,
+      scrollable: list,
     );
-    expect(find.text('На карте'), findsOneWidget);
-    expect(find.text('Сбросить'), findsOneWidget);
+    await tester.tap(find.text('Объёмная карта в поездке'));
+    expect(settings.drive3d, !was);
+    settings.drive3d = was;
+
+    // Each bigger block opens its own screen; back returns.
+    final navigator = tester.state<NavigatorState>(find.byType(Navigator).last);
+    for (final (row, title) in [
+      ('Дом, работа, места', 'Мои места'),
+      ('Как определяется', 'Местоположение'),
+      ('Где ничего не записывать', 'Безопасные зоны'),
+      ('Связь с автомобилем', 'Автомобиль'),
+      ('Файлы и собранные данные', 'Данные'),
+    ]) {
+      await tester.scrollUntilVisible(find.text(row), 80, scrollable: list);
+      await tester.tap(find.text(row));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Назад'), findsOneWidget, reason: title);
+      expect(find.text(title), findsWidgets);
+      expect(tester.takeException(), isNull, reason: title);
+      await snap(tester, 'settings_sub_${blocks.indexOf(title)}');
+      await navigator.maybePop();
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Назад'), findsNothing);
+    }
+    await shoot(
+      tester,
+      'settings_dark',
+      screen(),
+      tab: 3,
+      brightness: Brightness.dark,
+    );
+    await shoot(
+      tester,
+      'settings_tall',
+      screen(),
+      tab: 3,
+      size: const Size(380, 800),
+    );
   });
 
   testWidgets('car section, map chip and vehicle sheet with a live adapter', (

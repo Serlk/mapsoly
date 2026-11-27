@@ -13,7 +13,7 @@ extern "C" {
 #endif
 
 #define MLNB_API __attribute__((visibility("default")))
-#define MLNB_ABI_VERSION 4
+#define MLNB_ABI_VERSION 6
 
 typedef struct mlnb_map mlnb_map;
 
@@ -40,9 +40,11 @@ MLNB_API void mlnb_set_visible(mlnb_map*, int32_t visible);
 // Replaces the whole style. Runtime sources, layers and images are gone afterwards;
 // MLNB_EVENT_STYLE_LOADED(generation) says when they can be added again.
 MLNB_API void mlnb_set_style_json(mlnb_map*, const char* json, int64_t generation);
-// NaN leaves a component unchanged. duration_ms 0 = jump.
+// NaN leaves a component unchanged. padding_ltrb: NULL (unchanged) or left, top, right,
+// bottom insets in logical pixels; the camera target is shown at the centre of what
+// remains. duration_ms 0 = jump; linear != 0 = constant speed instead of ease-out.
 MLNB_API void mlnb_set_camera(mlnb_map*, double lat, double lon, double zoom, double bearing, double pitch,
-                              int32_t duration_ms);
+                              const double* padding_ltrb, int32_t duration_ms, int32_t linear);
 
 // Runtime style. JSON as in the style specification. Errors are logged, not returned.
 MLNB_API void mlnb_add_source(mlnb_map*, const char* id, const char* json);
@@ -65,6 +67,9 @@ MLNB_API void mlnb_set_blur(mlnb_map*, const float* xywh, int32_t count, float s
 MLNB_API void mlnb_get_stats(mlnb_map*, int64_t* out3);
 // One CSV row per rendered frame (boot_ms,t_ms,seg,interval_ms,frame_ms,...) until destroy.
 MLNB_API void mlnb_frame_log(mlnb_map*, const char* csv_path);
+// Debug: writes the next rendered frame, as handed to the compositor (blur included), to a
+// binary PPM file.
+MLNB_API void mlnb_snapshot(mlnb_map*, const char* ppm_path);
 // Scripted camera run of the spike; writes <prefix>.frames.csv, then MLNB_EVENT_BENCH_DONE.
 MLNB_API void mlnb_bench_start(mlnb_map*, const char* out_prefix);
 

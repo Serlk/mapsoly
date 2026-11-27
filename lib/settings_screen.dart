@@ -1,13 +1,23 @@
 import 'package:flutter/material.dart';
 
 import 'map/location_sheet.dart';
+import 'map/point_picker.dart';
+import 'map/ui_kit.dart';
 import 'obd/obd_service.dart';
 import 'obd/obd_widgets.dart';
 import 'positioning/positioning.dart';
 import 'settings.dart';
 import 'traffic/traffic.dart';
+import 'user/data_screen.dart';
+import 'user/file_exchange.dart';
+import 'user/places_screen.dart';
+import 'user/user_data.dart';
+import 'user/user_places.dart';
+import 'user/zones_screen.dart';
 
-/// Settings: appearance, traffic source, offline maps and location.
+/// Settings, first screen: a short list of titled blocks. The two choices
+/// made most often (theme, traffic) are right here; everything bigger —
+/// places, location, privacy zones, the car, data — opens as its own screen.
 ///
 /// Shown as a section of the main screen, above the bottom bar. Rows are
 /// tall and controls large enough to hit without aiming.
@@ -19,6 +29,11 @@ class SettingsScreen extends StatelessWidget {
     required this.positioning,
     required this.obd,
     required this.onOpenPacks,
+    required this.user,
+    required this.services,
+    required this.files,
+    this.canTilt = false,
+    this.onGoToPlace,
   });
 
   final AppSettings settings;
@@ -28,6 +43,15 @@ class SettingsScreen extends StatelessWidget {
   /// Null until the adapter service has started.
   final ObdService? obd;
   final VoidCallback onOpenPacks;
+  final UserData user;
+  final MapServices services;
+  final FileExchange files;
+
+  /// Whether the map engine can tilt: shows the 3D option.
+  final bool canTilt;
+
+  /// "Go there" from the list of saved places.
+  final void Function(SavedPlace place)? onGoToPlace;
 
   static const _themeNames = {
     ThemeMode.system: 'Как в системе',
@@ -94,32 +118,51 @@ class SettingsScreen extends StatelessWidget {
     controller.dispose();
   }
 
+  void _push(BuildContext context, WidgetBuilder page) =>
+      Navigator.of(context).push(MaterialPageRoute<void>(builder: page));
+
+  String _placesSummary() {
+    final places = user.places;
+    final parts = [
+      if (places.home != null) 'дом',
+      if (places.work != null) 'работа',
+      if (places.favorites.isNotEmpty)
+        plural(places.favorites.length, 'место', 'места', 'мест'),
+    ];
+    if (parts.isEmpty) return 'Дом, работа и любимые места';
+    final text = parts.join(', ');
+    return text[0].toUpperCase() + text.substring(1);
+  }
+
+  String _locationSummary() {
+    final status = positioning?.status;
+    if (status == null) return 'На этом устройстве не запустилось';
+    final fix = status.estimate;
+    if (fix == null) return 'Пока не определено';
+    final zone = status.privateArea ? ' · безопасная зона' : '';
+    return 'Точность около ${fix.accuracyM.round()} м$zone';
+  }
+
+  String _obdSummary() {
+    final service = obd;
+    if (service == null || !settings.obd.usable) return 'Адаптер ELM327';
+    return service.connected ? 'Адаптер подключён' : 'Адаптер не на связи';
+  }
+
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    Widget header(String text) => Padding(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
-      child: Text(
-        text,
-        style: theme.textTheme.titleSmall?.copyWith(
-          color: theme.colorScheme.primary,
-        ),
-      ),
-    );
     // Big segmented controls: one tap, no menus.
     Widget choice<T>(
       Map<T, String> names,
       T selected,
       ValueChanged<T> onChanged,
     ) => Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.symmetric(horizontal: Ui.pad),
       child: SizedBox(
         width: double.infinity,
         child: SegmentedButton<T>(
           showSelectedIcon: false,
-          style: const ButtonStyle(
-            minimumSize: WidgetStatePropertyAll(Size(0, 56)),
-          ),
+          style: Ui.segmented(),
           segments: [
             for (final e in names.entries)
               ButtonSegment(value: e.key, label: Text(e.value)),
@@ -130,45 +173,149 @@ class SettingsScreen extends StatelessWidget {
       ),
     );
 
-    return ListenableBuilder(
-      listenable: Listenable.merge([settings, traffic]),
-      builder: (context, _) => ListView(
-        padding: const EdgeInsets.only(bottom: 16),
-        children: [
-          header('Оформление'),
-          choice(
-            _themeNames,
-            settings.themeMode,
-            (v) => settings.themeMode = v,
-          ),
-          header('Пробки'),
-          choice(_trafficNames, traffic.source, traffic.select),
-          header('Карты'),
-          ListTile(
-            minTileHeight: 64,
-            leading: const Icon(Icons.download_for_offline_outlined),
-            title: const Text('Карты для работы без сети'),
-            subtitle: const Text('Скачать, обновить или удалить регионы'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: onOpenPacks,
-          ),
-          ListTile(
-            minTileHeight: 64,
-            leading: const Icon(Icons.dns_outlined),
-            title: const Text('Сервер карт'),
-            subtitle: Text(
-              settings.hasCustomCatalog
-                  ? Uri.parse(settings.catalogUrl).host
-                  : '${Uri.parse(settings.catalogUrl).host} (по умолчанию)',
-            ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _editServer(context),
-          ),
-          const Divider(height: 24),
-          LocationSheet(positioning: positioning, settings: settings),
-          if (obd != null)
-            ObdSettingsSection(settings: settings, service: obd!),
-        ],
+    return Material(
+      color: Theme.of(context).colorScheme.surface,
+      child: SafeArea(
+        child: ListenableBuilder(
+          listenable: Listenable.merge([
+            settings,
+            traffic,
+            positioning,
+            obd,
+            user.places,
+            user.zones,
+          ]),
+          builder: (context, _) {
+            final zones = user.zones;
+            return ListView(
+              padding: const EdgeInsets.only(bottom: Ui.pad),
+              children: [
+                const SectionHeader('Оформление'),
+                choice(
+                  _themeNames,
+                  settings.themeMode,
+                  (v) => settings.themeMode = v,
+                ),
+                const SectionHeader('Пробки'),
+                choice(_trafficNames, traffic.source, traffic.select),
+                const SectionHeader('Карты'),
+                BigRow(
+                  icon: Icons.download_for_offline_outlined,
+                  title: 'Карты для работы без сети',
+                  subtitle: 'Скачать, обновить или удалить регионы',
+                  onTap: onOpenPacks,
+                ),
+                BigRow(
+                  icon: Icons.dns_outlined,
+                  title: 'Сервер карт',
+                  subtitle: settings.hasCustomCatalog
+                      ? Uri.parse(settings.catalogUrl).host
+                      : '${Uri.parse(settings.catalogUrl).host} '
+                            '(по умолчанию)',
+                  onTap: () => _editServer(context),
+                ),
+                if (canTilt)
+                  SwitchListTile(
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: Ui.pad,
+                    ),
+                    secondary: const Icon(Icons.view_in_ar_outlined),
+                    title: const Text('Объёмная карта в поездке'),
+                    subtitle: const Text(
+                      'Камера позади машины, карта повёрнута по ходу',
+                    ),
+                    value: settings.drive3d,
+                    onChanged: (v) => settings.drive3d = v,
+                  ),
+                const SectionHeader('Мои места'),
+                BigRow(
+                  icon: Icons.star_outline,
+                  title: 'Дом, работа, места',
+                  subtitle: _placesSummary(),
+                  onTap: () => _push(
+                    context,
+                    (_) => PlacesScreen(
+                      user: user,
+                      services: services,
+                      onGo: onGoToPlace,
+                    ),
+                  ),
+                ),
+                const SectionHeader('Местоположение'),
+                BigRow(
+                  icon: Icons.my_location,
+                  title: 'Как определяется',
+                  subtitle: _locationSummary(),
+                  onTap: () => _push(
+                    context,
+                    (_) => SubPage(
+                      title: 'Местоположение',
+                      child: LocationSheet(
+                        positioning: positioning,
+                        settings: settings,
+                        showTitle: false,
+                      ),
+                    ),
+                  ),
+                ),
+                const SectionHeader('Безопасные зоны'),
+                BigRow(
+                  icon: Icons.shield_outlined,
+                  title: 'Где ничего не записывать',
+                  subtitle: zones.unconfirmed
+                      ? 'Список повреждён — проверьте его'
+                      : zones.isEmpty
+                      ? 'Зон нет'
+                      : plural(zones.zones.length, 'зона', 'зоны', 'зон'),
+                  warning: zones.unconfirmed,
+                  onTap: () => _push(
+                    context,
+                    (_) => ZonesScreen(
+                      user: user,
+                      services: services,
+                      engine: positioning?.engine,
+                    ),
+                  ),
+                ),
+                const SectionHeader('Автомобиль'),
+                BigRow(
+                  icon: Icons.directions_car_outlined,
+                  title: 'Связь с автомобилем',
+                  subtitle: _obdSummary(),
+                  onTap: obd == null
+                      ? null
+                      : () => _push(
+                          context,
+                          (_) => SubPage(
+                            title: 'Автомобиль',
+                            child: SingleChildScrollView(
+                              child: ObdSettingsSection(
+                                settings: settings,
+                                service: obd!,
+                                showHeader: false,
+                              ),
+                            ),
+                          ),
+                        ),
+                ),
+                const SectionHeader('Данные'),
+                BigRow(
+                  icon: Icons.folder_outlined,
+                  title: 'Файлы и собранные данные',
+                  subtitle: 'Маршруты и места, журналы поездок, своя база',
+                  onTap: () => _push(
+                    context,
+                    (_) => DataScreen(
+                      user: user,
+                      files: files,
+                      engine: positioning?.engine,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
       ),
     );
   }

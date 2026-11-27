@@ -59,6 +59,11 @@ map() {
     --input "/data/$SRC" --output "/data/$OUT/map.pmtiles" \
     --store "/data/$OUT/tm-store"
   rm -rf "${ROOT:?}/$OUT/tm-store"
+  # tilemaker writes tiles in build order; cutting regions out of the
+  # archive needs them ordered by tile id.
+  echo ">> ordering the archive for region extraction"
+  docker run --rm $AS_ME -v "$ROOT:/data" protomaps/go-pmtiles:latest \
+    cluster "/data/$OUT/map.pmtiles"
   touch "$ROOT/$OUT/map.done"
 }
 

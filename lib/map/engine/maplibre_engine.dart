@@ -52,54 +52,129 @@ abstract final class MapLibreEngine {
 /// Camera control for [MapLibreView].
 ///
 /// The camera lives here, in Dart: gestures and the calls below compute the
-/// new camera and push it to the native map, so [center] and [zoom] are
-/// always known synchronously.
+/// new camera and push it to the native map, so [center], [zoom], [bearing]
+/// and [pitch] are always known synchronously. While the native map eases
+/// towards a new camera, the same interpolation is evaluated here, so the
+/// getters (and [cameraChanges]) follow what is on screen.
 class MapLibreViewController implements MapViewController {
+  /// Where the camera is, or is heading (the end of a running animation).
   MapCamera? _camera;
   Size _size = Size.zero;
   _MapLibreViewState? _view;
+  final _changes = _CameraChanges();
 
-  /// Parts of the view under other UI (`MediaQuery.padding` where the view
-  /// is built). "Centre" for the screen is the centre of what is left.
-  EdgeInsets _insets = EdgeInsets.zero;
+  // The animation the native map is running, mirrored.
+  CameraTween? _tween;
+  final Stopwatch _tweenClock = Stopwatch();
+  int _tweenMs = 0;
 
-  /// The visible centre, in logical pixels from the view centre.
-  Offset get _visibleCentre => Offset(
-    (_insets.left - _insets.right) / 2,
-    (_insets.top - _insets.bottom) / 2,
-  );
+  /// Insets set by the screen and those of the place the view is built in
+  /// (`MediaQuery.padding`: a bottom bar the body extends under). The camera
+  /// target is shown at the centre of what the larger of them leave free.
+  EdgeInsetsLike _userPadding = const EdgeInsetsLike(0, 0, 0, 0);
+  EdgeInsetsLike _viewInsets = const EdgeInsetsLike(0, 0, 0, 0);
+  EdgeInsetsLike get _padding => _userPadding.max(_viewInsets);
 
-  /// The camera that shows [center] in the middle of the visible part.
-  MapCamera _cameraFor(LatLng center, double zoom, double bearing) =>
-      MapCamera(center, zoom, bearing).panned(_visibleCentre);
+  /// Where the camera target is drawn, from the view's top-left corner.
+  Offset get _origin => _size.center(Offset.zero) + _padding.centreOffset;
 
   /// Set when the native map could not be created: the Flutter engine draws
   /// instead and every call is passed on to its controller.
   FlutterMapViewController? _fallback;
 
+  /// What is on screen right now (differs from [_camera] during an animation).
+  MapCamera? get _shown {
+    final tween = _tween;
+    if (tween == null) return _camera;
+    final t = _tweenClock.elapsedMilliseconds / _tweenMs;
+    if (t >= 1) {
+      _tween = null;
+      return _camera;
+    }
+    return tween.at(t);
+  }
+
   @override
   bool get ready => _fallback?.ready ?? (_camera != null && !_size.isEmpty);
 
   @override
-  LatLng get center => _fallback?.center ?? _camera!.latLngAt(_visibleCentre);
+  LatLng get center => _fallback?.center ?? _shown!.center;
 
   @override
-  double get zoom => _fallback?.zoom ?? _camera!.zoom;
+  double get zoom => _fallback?.zoom ?? _shown!.zoom;
 
   @override
-  double get bearing => _fallback?.bearing ?? _camera?.bearing ?? 0;
+  double get bearing => _fallback?.bearing ?? _shown?.bearing ?? 0;
 
   @override
-  void move(LatLng center, double zoom) {
+  double get pitch => _fallback?.pitch ?? _shown?.pitch ?? 0;
+
+  @override
+  double get maxPitch => _fallback?.maxPitch ?? MapCamera.maxPitch;
+
+  @override
+  Listenable get cameraChanges => _fallback?.cameraChanges ?? _changes;
+
+  @override
+  void move(LatLng center, double zoom) =>
+      moveCamera(center: center, zoom: zoom);
+
+  DateTime? _lastMove;
+
+  @override
+  void moveCamera({
+    LatLng? center,
+    double? zoom,
+    double? bearing,
+    double? pitch,
+    Duration? duration,
+  }) {
     final fallback = _fallback;
-    if (fallback != null) return fallback.move(center, zoom);
-    _view?._moveCamera(
-      _cameraFor(
-        center,
-        zoom.clamp(MapCamera.minZoom, MapCamera.maxZoom).toDouble(),
-        _camera?.bearing ?? 0,
-      ),
+    if (fallback != null) {
+      return fallback.moveCamera(
+        center: center,
+        zoom: zoom,
+        bearing: bearing,
+        pitch: pitch,
+        duration: duration,
+      );
+    }
+    final current = _camera;
+    if (current == null) return;
+    final target = current.copyWith(
+      center: center,
+      zoom: zoom?.clamp(MapCamera.minZoom, MapCamera.maxZoom).toDouble(),
+      bearing: bearing == null ? null : MapCamera.normalizeBearing(bearing),
+      pitch: pitch?.clamp(0.0, MapCamera.maxPitch).toDouble(),
     );
+    final now = DateTime.now();
+    final sinceLast = _lastMove == null
+        ? null
+        : now.difference(_lastMove!).inMilliseconds;
+    _lastMove = now;
+    final plan = planCameraMove(
+      requestedMs: duration?.inMilliseconds,
+      sinceLastMoveMs: sinceLast,
+      screenDistance: (_shown ?? current).screenOf(target.center).distance,
+      zoomChange: (target.zoom - current.zoom).abs(),
+      viewSide: _size.longestSide,
+    );
+    _view?._setCamera(target, durationMs: plan.ms, linear: plan.linear);
+  }
+
+  @override
+  void setPadding(EdgeInsets padding) {
+    final fallback = _fallback;
+    if (fallback != null) return fallback.setPadding(padding);
+    final p = EdgeInsetsLike(
+      padding.left,
+      padding.top,
+      padding.right,
+      padding.bottom,
+    );
+    if (p == _userPadding) return;
+    _userPadding = p;
+    _view?._paddingChanged();
   }
 
   @override
@@ -109,14 +184,12 @@ class MapLibreViewController implements MapViewController {
     final camera = MapCamera.fit(
       points,
       _size,
-      EdgeInsetsLike(
-        padding.left + _insets.left,
-        padding.top + _insets.top,
-        padding.right + _insets.right,
-        padding.bottom + _insets.bottom,
-      ),
+      EdgeInsetsLike(padding.left, padding.top, padding.right, padding.bottom),
+      cameraPadding: _padding,
     );
-    if (camera != null) _view?._moveCamera(camera);
+    if (camera != null) {
+      _view?._setCamera(camera, durationMs: _shown == null ? 0 : 350);
+    }
   }
 
   @override
@@ -125,19 +198,53 @@ class MapLibreViewController implements MapViewController {
     if (fallback != null) return fallback.panBy(fraction);
     final camera = _camera;
     if (camera == null) return;
-    _view?._moveCamera(camera.panned(-fraction * _size.shortestSide));
+    _view?._setCamera(
+      camera.panned(-fraction * _size.shortestSide),
+      durationMs: 250,
+    );
   }
 
   @override
-  void resetNorth() {
-    final fallback = _fallback;
-    if (fallback != null) return fallback.resetNorth();
-    final camera = _camera;
-    if (camera != null) _view?._moveCamera(camera.withBearing(0));
-  }
+  void resetNorth() => moveCamera(bearing: 0);
 
   @override
-  void dispose() => _fallback?.dispose();
+  void dispose() {
+    _fallback?.dispose();
+    _changes.dispose();
+  }
+}
+
+class _CameraChanges extends ChangeNotifier {
+  void notify() => notifyListeners();
+}
+
+/// How a camera move asked for by the screen is animated.
+///
+/// An explicit duration is taken as it is (0 jumps). Otherwise: calls that
+/// come in a steady stream (a position update about once a second while
+/// driving) are run at constant speed for a little longer than their
+/// interval, so they blend into one continuous motion instead of
+/// start-stop; a single call eases over a short hop and jumps when the
+/// target is far away.
+({int ms, bool linear}) planCameraMove({
+  required int? requestedMs,
+  required int? sinceLastMoveMs,
+  required double screenDistance,
+  required double zoomChange,
+  required double viewSide,
+}) {
+  if (requestedMs != null) return (ms: requestedMs, linear: false);
+  final far = screenDistance > 2 * viewSide || zoomChange >= 2.5;
+  if (far) return (ms: 0, linear: false);
+  if (sinceLastMoveMs != null &&
+      sinceLastMoveMs >= 150 &&
+      sinceLastMoveMs <= 1600) {
+    return (
+      ms: (sinceLastMoveMs * 1.15).round().clamp(250, 1800),
+      linear: true,
+    );
+  }
+  return (ms: 350, linear: false);
 }
 
 class MapLibreView extends StatefulWidget {
@@ -203,17 +310,17 @@ class _MapLibreViewState extends State<MapLibreView>
   Object? _pinsKey;
 
   late final MapGestures _gestures = MapGestures(
-    camera: () => widget.controller._camera!,
+    // What is on screen: a finger that lands during an animation takes
+    // over from there.
+    camera: () => widget.controller._shown!,
     setCamera: (camera, {animated = false}) =>
         _setCamera(camera, durationMs: animated ? 220 : 0),
     onLongPress: (position) {
-      final camera = widget.controller._camera;
+      final camera = widget.controller._shown;
       if (camera == null) return;
-      widget.onLongPress(
-        camera.latLngAt(position - widget.controller._size.center(Offset.zero)),
-      );
+      widget.onLongPress(camera.latLngAt(position - widget.controller._origin));
     },
-    viewSize: () => widget.controller._size,
+    origin: () => widget.controller._origin,
     onAnimating: (on) => on ? _startFling() : _fling.stop(),
   );
   late final Ticker _fling = createTicker(_onFlingTick);
@@ -222,8 +329,6 @@ class _MapLibreViewState extends State<MapLibreView>
   // style by itself, alternately after <ms> and after 80 ms (a second switch
   // while the first style is still loading), to exercise style changes
   // without touching the screen.
-  bool _ownInitialCamera = false;
-  bool _insetsKnown = false;
   bool _benchStarted = false;
   Timer? _benchTimer;
   bool _flipped = false;
@@ -240,13 +345,14 @@ class _MapLibreViewState extends State<MapLibreView>
 
   Duration _flingLast = Duration.zero;
   Timer? _cameraReport;
+  Timer? _cameraTick;
+  Timer? _snapshotTimer;
   bool _cameraDirty = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _ownInitialCamera = widget.controller._camera == null;
     widget.controller
       .._view = this
       .._camera ??= MapCamera(
@@ -254,6 +360,8 @@ class _MapLibreViewState extends State<MapLibreView>
         widget.initialZoom
             .clamp(MapCamera.minZoom, MapCamera.maxZoom)
             .toDouble(),
+        0,
+        (_debugPitch ?? 0).clamp(0, MapCamera.maxPitch).toDouble(),
       );
     final flip = int.tryParse(Platform.environment['MAPSOLY_MAP_FLIP'] ?? '');
     if (flip != null && flip > 0) _scheduleFlip(flip, true);
@@ -387,14 +495,20 @@ class _MapLibreViewState extends State<MapLibreView>
     // Debug hook: one CSV row per rendered frame.
     final log = env['MAPSOLY_MAP_FRAMELOG'];
     if (log != null && log.isNotEmpty) bridge.frameLog(map, log);
-    final camera = widget.controller._camera!;
-    bridge.setCamera(
-      map,
-      lat: camera.center.latitude,
-      lon: camera.center.longitude,
-      zoom: camera.mapLibreZoom,
-      bearing: camera.bearing,
-    );
+    // Debug hook MAPSOLY_MAP_SNAPSHOTS=<prefix>,<period ms>,<count>: writes
+    // the map's own frames (without the Flutter layer) to <prefix>-NN.ppm.
+    final shots = (env['MAPSOLY_MAP_SNAPSHOTS'] ?? '').split(',');
+    if (shots.length == 3 && _snapshotTimer == null) {
+      final period = int.tryParse(shots[1]) ?? 1000;
+      final count = int.tryParse(shots[2]) ?? 1;
+      var n = 0;
+      _snapshotTimer = Timer.periodic(Duration(milliseconds: period), (t) {
+        final m = _map;
+        if (m == null || n >= count) return t.cancel();
+        bridge.snapshot(m, '${shots[0]}-${'${n++}'.padLeft(2, '0')}.ppm');
+      });
+    }
+    _sendCamera(widget.controller._camera!, 0, false);
     if (!widget.visible) bridge.setVisible(map, false);
     _channel.invokeMethod<void>('commit');
     _syncScene();
@@ -463,6 +577,7 @@ class _MapLibreViewState extends State<MapLibreView>
           ? _styleLoading
           : '${_dark ? 'dark' : 'bright'}|'
                 '${[for (final p in packs) '${p.path}#${identityHashCode(p.archive)}'].join(',')}|'
+                '${scene.buildings3d ? '3d' : ''}|'
                 '${colors.primary}|${colors.surface}|${colors.outline}',
       routes: _routesJson,
       points: pointsGeoJson(
@@ -492,6 +607,12 @@ class _MapLibreViewState extends State<MapLibreView>
         if (p.isNotEmpty) (path: p, archive: PmTilesArchive.open(p)),
     ];
   }();
+  // Debug hook MAPSOLY_MAP_3D=<pitch>: extruded buildings on and the camera
+  // tilted by that many degrees from the start.
+  static final double? _debugPitch = double.tryParse(
+    Platform.environment['MAPSOLY_MAP_3D'] ?? '',
+  );
+  static bool get _debug3d => _debugPitch != null;
   static int _packSetCounter = 0;
   String? _servedPacks;
 
@@ -609,6 +730,7 @@ class _MapLibreViewState extends State<MapLibreView>
         name: name,
         pmtilesPath: served == null ? packs.single.path : null,
         tiles: served,
+        buildings3d: scene.buildings3d || _debug3d,
         assetsDir: MapLibreEngine.assetsDirectory,
         colors: colors,
       );
@@ -724,39 +846,70 @@ class _MapLibreViewState extends State<MapLibreView>
 
   // --------------------------------------------------------------- camera
 
-  /// A camera change asked for by the screen: eased when it is a short hop,
-  /// a jump when the target is far away.
-  void _moveCamera(MapCamera target) {
-    final current = widget.controller._camera;
-    final size = widget.controller._size;
-    var duration = 0;
-    if (current != null && !size.isEmpty && _map != null) {
-      final near =
-          current.screenOf(target.center).distance < 2 * size.longestSide &&
-          (current.zoom - target.zoom).abs() < 2.5;
-      if (near) duration = 350;
-    }
-    _setCamera(target, durationMs: duration);
+  void _sendCamera(MapCamera camera, int durationMs, bool linear) {
+    final map = _map;
+    if (map == null) return;
+    final p = widget.controller._padding;
+    _bridge!.setCamera(
+      map,
+      lat: camera.center.latitude,
+      lon: camera.center.longitude,
+      zoom: camera.mapLibreZoom,
+      bearing: camera.bearing,
+      pitch: camera.pitch,
+      padding: [p.left, p.top, p.right, p.bottom],
+      durationMs: durationMs,
+      linear: linear,
+    );
   }
 
-  void _setCamera(MapCamera camera, {int durationMs = 0}) {
+  /// Makes [camera] the camera: at once, or eased over [durationMs].
+  void _setCamera(MapCamera camera, {int durationMs = 0, bool linear = false}) {
     final controller = widget.controller;
-    if (camera == controller._camera) return;
+    camera = camera.copyWith(viewHeight: controller._size.height);
+    final shown = controller._shown;
+    if (camera == controller._camera && controller._tween == null) return;
     controller._camera = camera;
-    final map = _map;
-    if (map != null) {
-      _bridge!.setCamera(
-        map,
-        lat: camera.center.latitude,
-        lon: camera.center.longitude,
-        zoom: camera.mapLibreZoom,
-        bearing: camera.bearing,
-        durationMs: durationMs,
-      );
+    if (durationMs > 0 && shown != null && _map != null) {
+      controller
+        .._tween = CameraTween(shown, camera, linear: linear)
+        .._tweenMs = durationMs
+        .._tweenClock.reset()
+        .._tweenClock.start();
+    } else {
+      controller._tween = null;
+      durationMs = 0;
     }
-    // Report now and then while it moves, and once after it stopped.
+    _sendCamera(camera, durationMs, linear);
+    _cameraMoved();
+  }
+
+  /// The camera padding changed: same target, new place on screen.
+  void _paddingChanged() {
+    final camera = widget.controller._camera;
+    if (camera == null) return;
+    widget.controller._tween = null;
+    _sendCamera(camera, _map == null ? 0 : 300, false);
+    _cameraMoved();
+  }
+
+  /// Tells the listeners: [MapViewController.cameraChanges] about 30 times
+  /// a second while the camera moves, the screen's `onCameraChanged` every
+  /// 250 ms and once after it stopped.
+  void _cameraMoved() {
     _cameraDirty = true;
     _cameraReport ??= Timer(_cameraReportInterval, _reportCamera);
+    _cameraTick ??= Timer.periodic(const Duration(milliseconds: 33), (timer) {
+      final controller = widget.controller;
+      // `_shown` ends the mirrored animation when its time is up.
+      controller._shown;
+      controller._changes.notify();
+      if (controller._tween == null && !_cameraDirty) {
+        timer.cancel();
+        _cameraTick = null;
+      }
+    });
+    widget.controller._changes.notify();
   }
 
   void _reportCamera() {
@@ -764,7 +917,12 @@ class _MapLibreViewState extends State<MapLibreView>
     if (!_cameraDirty || _disposed) return;
     _cameraDirty = false;
     final controller = widget.controller;
-    widget.onCameraChanged(controller.center, controller._camera!.zoom);
+    widget.onCameraChanged(controller.center, controller.zoom);
+    // Still animating: report again until it has stopped.
+    if (controller._tween != null) {
+      _cameraDirty = true;
+      _cameraReport = Timer(_cameraReportInterval, _reportCamera);
+    }
   }
 
   void _startFling() {
@@ -801,6 +959,8 @@ class _MapLibreViewState extends State<MapLibreView>
     WidgetsBinding.instance.removeObserver(this);
     if (widget.controller._view == this) widget.controller._view = null;
     _cameraReport?.cancel();
+    _cameraTick?.cancel();
+    _snapshotTimer?.cancel();
     _flipTimer?.cancel();
     _benchTimer?.cancel();
     _gestures.dispose();
@@ -828,28 +988,31 @@ class _MapLibreViewState extends State<MapLibreView>
     }
     final scheme = Theme.of(context).colorScheme;
     // UI the view continues under (a bottom bar with extendBody): the
-    // attribution and the "centre" of the camera keep clear of it.
+    // attribution and the camera target keep clear of it.
     final insets = MediaQuery.paddingOf(context);
     final controller = widget.controller;
-    if (controller._insets != insets) {
-      final first = !_insetsKnown;
-      _insetsKnown = true;
-      final camera = controller._camera;
-      // The initial centre is meant for the visible part as well.
-      final centre = first && _ownInitialCamera ? camera?.center : null;
-      controller._insets = insets;
-      if (centre != null) {
-        controller._camera = controller._cameraFor(
-          centre,
-          camera!.zoom,
-          camera.bearing,
-        );
-      }
+    final viewInsets = EdgeInsetsLike(
+      insets.left,
+      insets.top,
+      insets.right,
+      insets.bottom,
+    );
+    if (controller._viewInsets != viewInsets) {
+      controller._viewInsets = viewInsets;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _paddingChanged();
+      });
     }
     _wanted = _describe(widget.scene, scheme);
     return LayoutBuilder(
       builder: (context, constraints) {
-        widget.controller._size = constraints.biggest;
+        if (controller._size != constraints.biggest) {
+          controller._size = constraints.biggest;
+          // The perspective of a tilted view depends on its height.
+          controller._camera = controller._camera?.copyWith(
+            viewHeight: constraints.biggest.height,
+          );
+        }
         _wantedBlur = _blurOf(widget.scene, constraints.biggest);
         _syncScene();
         // The rectangle on screen is known after layout.

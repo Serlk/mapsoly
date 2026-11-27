@@ -18,7 +18,11 @@ class LocationSheet extends StatelessWidget {
     super.key,
     required this.positioning,
     required this.settings,
+    this.showTitle = true,
   });
+
+  /// False when the surrounding page already carries the title.
+  final bool showTitle;
 
   /// Null when positioning could not start on this device.
   final PositioningNotifier? positioning;
@@ -50,6 +54,9 @@ class LocationSheet extends StatelessWidget {
               'Похоже на подмену GPS — спутники не используются',
             if (status.jammingSuspected) 'Похоже на глушение GPS',
             if (status.onlineError != null) 'Онлайн-уточнение не отвечает',
+            if (status.privateArea)
+              'Вы в безопасной зоне: сбор базы и онлайн-уточнение '
+                  'приостановлены',
           ],
         ];
         return SingleChildScrollView(
@@ -57,13 +64,16 @@ class LocationSheet extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                child: Text(
-                  'Местоположение',
-                  style: theme.textTheme.titleMedium,
-                ),
-              ),
+              if (showTitle)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Text(
+                    'Местоположение',
+                    style: theme.textTheme.titleMedium,
+                  ),
+                )
+              else
+                const SizedBox(height: 8),
               for (final line in lines)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 2, 16, 2),
@@ -71,7 +81,7 @@ class LocationSheet extends StatelessWidget {
                 ),
               const SizedBox(height: 8),
               SwitchListTile(
-                dense: true,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
                 title: const Text('Уточнять онлайн'),
                 subtitle: const Text(
                   'Неизвестные Wi-Fi и соты отправляются в beaconDB и Apple',
@@ -80,7 +90,7 @@ class LocationSheet extends StatelessWidget {
                 onChanged: (v) => settings.onlineLocation = v,
               ),
               SwitchListTile(
-                dense: true,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
                 title: const Text('Собирать свою базу'),
                 subtitle: const Text(
                   'Запоминать Wi-Fi и соты, пока спутники дают точную позицию',

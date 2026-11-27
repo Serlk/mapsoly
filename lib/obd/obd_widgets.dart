@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../map/ui_kit.dart';
 import '../settings.dart';
 import 'obd_service.dart';
 import 'obd_session.dart';
@@ -24,10 +25,14 @@ class ObdSettingsSection extends StatelessWidget {
     super.key,
     required this.settings,
     required this.service,
+    this.showHeader = true,
   });
 
   final AppSettings settings;
   final ObdService service;
+
+  /// False when the surrounding page already carries the title.
+  final bool showHeader;
 
   static const _linkNames = {
     ObdLink.bluetooth: 'Bluetooth',
@@ -151,15 +156,16 @@ class ObdSettingsSection extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
-              child: Text(
-                'Автомобиль',
-                style: theme.textTheme.titleSmall?.copyWith(
-                  color: theme.colorScheme.primary,
+            if (showHeader)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
+                child: Text(
+                  'Автомобиль',
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    color: theme.colorScheme.primary,
+                  ),
                 ),
               ),
-            ),
             SwitchListTile(
               title: const Text('Адаптер ELM327'),
               subtitle: Text(
@@ -177,9 +183,7 @@ class ObdSettingsSection extends StatelessWidget {
                   width: double.infinity,
                   child: SegmentedButton<ObdLink>(
                     showSelectedIcon: false,
-                    style: const ButtonStyle(
-                      minimumSize: WidgetStatePropertyAll(Size(0, 56)),
-                    ),
+                    style: Ui.segmented(),
                     segments: [
                       for (final e in _linkNames.entries)
                         ButtonSegment(value: e.key, label: Text(e.value)),
@@ -259,9 +263,8 @@ class VehicleChip extends StatelessWidget {
             '${_num(t.fuelRateLph)} л/ч',
           if (hot) '${t.coolantC}°',
         ];
-        return Card(
+        return Glass(
           color: warn ? colors.errorContainer : null,
-          clipBehavior: Clip.antiAlias,
           child: InkWell(
             onTap: () => showModalBottomSheet<void>(
               context: context,

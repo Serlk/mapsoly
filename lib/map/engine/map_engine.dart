@@ -17,6 +17,7 @@ class MapScene {
     this.offlineMaps = const [],
     this.offlineLoading = false,
     this.blurRects = const [],
+    this.buildings3d = false,
     this.traffic,
     this.route,
     this.alternatives = const [],
@@ -53,6 +54,9 @@ class MapScene {
   /// that draw outside Flutter's scene blur them themselves; an engine drawn
   /// by Flutter ignores this (a BackdropFilter in the UI already works there).
   final List<Rect> blurRects;
+
+  /// Draw buildings extruded when the camera is tilted.
+  final bool buildings3d;
 
   /// Traffic overlay to draw above the roads; null when off or not loaded.
   final TrafficOverlay? traffic;
@@ -91,14 +95,39 @@ abstract class MapViewController {
   /// 0 when the map is north-up (always, for engines that do not rotate).
   double get bearing;
 
+  /// Tilt in degrees: 0 looks straight down. Engines without tilt report 0.
+  double get pitch;
+
+  /// Largest tilt the engine supports (0 when it cannot tilt at all), so the
+  /// UI can hide 3D controls.
+  double get maxPitch;
+
   void move(LatLng center, double zoom);
+
+  /// Moves the camera. Null arguments keep the current value. [duration]
+  /// null uses the engine's default easing; Duration.zero jumps.
+  void moveCamera({
+    LatLng? center,
+    double? zoom,
+    double? bearing,
+    double? pitch,
+    Duration? duration,
+  });
+
+  /// Insets (logical px) of the area the camera should treat as the visible
+  /// map: the camera target is placed at the centre of what remains. Used to
+  /// keep the position in the lower third while driving and clear of UI.
+  void setPadding(EdgeInsets padding);
+
+  /// Notifies when bearing, pitch, zoom or centre change (also by gestures),
+  /// at most ~30 times a second: drives the compass button.
+  Listenable get cameraChanges;
 
   /// Shows all of [points], leaving [padding] free for the UI on top.
   ///
-  /// The MapLibre engine additionally keeps clear of the `MediaQuery.padding`
-  /// of the place it is built in (a bottom bar the body extends under), for
-  /// this call and for [center]/[move]: there "centre" is the centre of the
-  /// part of the view that is not under such insets.
+  /// It is added to the camera padding (see [setPadding]; the MapLibre engine
+  /// also counts the `MediaQuery.padding` of the place it is built in, e.g. a
+  /// bottom bar the body extends under, as camera padding).
   void fit(List<LatLng> points, EdgeInsets padding);
 
   /// Pans by a fraction of the view's shorter side ((1, 0) is a full side

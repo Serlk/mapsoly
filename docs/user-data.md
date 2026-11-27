@@ -206,9 +206,9 @@ leave the device:
 7. **Explicit region preload** over an area that contains a zone still asks
    about transmitters around it.
 8. **Code outside `lib/user` / `lib/positioning`** (not changed here):
-   - the online search fallback (Photon) gets the current position as its
-     "near" hint (`map_screen.dart`, `_searchNear`); wrap it with
-     `guard.shareable`;
+   - the online search fallback (Photon): its "near" hint goes through
+     `guard.shareable` (`map_screen.dart`, `_searchNear`), so it is dropped
+     inside a zone; the query text itself is of course sent;
    - `settings.json` stores the last map centre;
    - online map and traffic tiles are requested for whatever the map shows.
 9. **Stale position.** If the last estimate lies in a zone and nothing

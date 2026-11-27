@@ -45,6 +45,7 @@ abstract final class MapIds {
   /// Lowest overlay layer: traffic goes right below it (above the roads,
   /// below the route and the labels).
   static const firstOverlayLayer = 'mapsoly-alt-casing';
+  static const buildings3d = 'mapsoly-buildings-3d';
   static const trafficPrefix = 'mapsoly-traffic-';
 }
 
@@ -135,6 +136,45 @@ List<Map<String, Object>> markerLayers(OverlayColors c) => [
   },
 ];
 
+/// Extruded buildings, from the OpenMapTiles `building` layer. Shown from
+/// zoom 15 (app zoom); flat when the view is not tilted, so always there.
+Map<String, Object> buildingsLayer(String color) => {
+  'id': MapIds.buildings3d,
+  'type': 'fill-extrusion',
+  'source': 'openmaptiles',
+  'source-layer': 'building',
+  'minzoom': 14,
+  'paint': {
+    'fill-extrusion-color': color,
+    'fill-extrusion-height': ['get', 'render_height'],
+    'fill-extrusion-base': ['get', 'render_min_height'],
+    'fill-extrusion-opacity': 0.85,
+  },
+};
+
+/// Colour for extruded buildings in the style [name]: soft grey on the light
+/// map; on the dark one a little lighter than the flat buildings of the
+/// style, so the blocks stand out from the ground.
+String buildingsColor(String name, Map<String, dynamic> style) {
+  if (name != 'dark') return '#d6d1ca';
+  for (final layer in (style['layers'] as List).cast<Map<String, dynamic>>()) {
+    if (layer['source-layer'] != 'building' || layer['type'] != 'fill') {
+      continue;
+    }
+    final paint = layer['paint'];
+    final c = paint is Map ? paint['fill-color'] : null;
+    final m = c is String
+        ? RegExp(r'^#([0-9a-fA-F]{6})$').firstMatch(c.trim())
+        : null;
+    if (m == null) continue;
+    final v = int.parse(m.group(1)!, radix: 16);
+    int up(int x) => (x + 28).clamp(0, 255);
+    final r = up(v >> 16 & 0xff), g = up(v >> 8 & 0xff), b = up(v & 0xff);
+    return '#${(r << 16 | g << 8 | b).toRadixString(16).padLeft(6, '0')}';
+  }
+  return '#3a4048';
+}
+
 void _addOverlays(Map<String, dynamic> style, OverlayColors colors) {
   final sources = style['sources'] as Map<String, dynamic>;
   sources[MapIds.routes] = _geoJsonSource();
@@ -159,6 +199,7 @@ String buildVectorStyle({
   required String name,
   String? pmtilesPath,
   VectorTiles? tiles,
+  bool buildings3d = false,
   required String assetsDir,
   required OverlayColors colors,
 }) {
@@ -177,6 +218,14 @@ String buildVectorStyle({
   style['glyphs'] = 'file://$assetsDir/fonts/{fontstack}/{range}.pbf';
   style['sprite'] = 'file://$assetsDir/sprites/$name/sprite';
   _addOverlays(style, colors);
+  if (buildings3d) {
+    // Under the route (and so under the labels), over everything flat.
+    final layers = (style['layers'] as List).cast<Map<String, dynamic>>();
+    layers.insert(
+      layers.indexWhere((l) => l['id'] == MapIds.firstOverlayLayer),
+      buildingsLayer(buildingsColor(name, style)),
+    );
+  }
   return jsonEncode(style);
 }
 

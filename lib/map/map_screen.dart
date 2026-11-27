@@ -1,11 +1,10 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:ui' as ui;
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:latlong2/latlong.dart';
-import 'package:path_provider/path_provider.dart';
 
 import '../obd/obd_service.dart';
 import '../obd/obd_widgets.dart';
@@ -19,38 +18,99 @@ import '../positioning/positioning.dart';
 import '../settings.dart';
 import '../settings_screen.dart';
 import '../traffic/traffic.dart';
+import '../user/file_exchange.dart';
+import '../user/places_screen.dart';
+import '../user/user_data.dart';
+import '../user/user_places.dart';
+import 'drive_camera.dart';
 import 'engine/engines.dart';
 import 'engine/map_engine.dart';
 import 'guidance.dart';
 import 'location_sheet.dart';
+import 'point_picker.dart';
 import 'route_controller.dart';
 import 'route_panel.dart';
 import 'routes_screen.dart';
+import 'ui_kit.dart';
 
 /// Sections of the main screen, in the order of the bottom bar.
 enum _Section { search, navigator, routes, settings }
 
+/// Stand-ins for what the screen normally creates itself, so that it can
+/// be pumped in a widget test.
+@visibleForTesting
+class MapScreenTestHooks {
+  MapScreenTestHooks({
+    required this.controller,
+    required this.mapView,
+    this.engine,
+    this.route,
+    this.obd,
+    this.files,
+    this.compass,
+  });
+
+  final MapViewController controller;
+
+  /// Drawn instead of the real map view.
+  final Widget Function(MapScene scene) mapView;
+
+  /// Positioning engine to use (not started by the screen's own sources).
+  final PositioningEngine? engine;
+
+  /// The trip controller to use (disposed by the screen).
+  final RouteController? route;
+  final ObdService? obd;
+  final FileExchange? files;
+  final CompassSource? compass;
+}
+
 class MapScreen extends StatefulWidget {
-  const MapScreen({super.key, required this.settings});
+  const MapScreen({
+    super.key,
+    required this.settings,
+    required this.user,
+    this.testHooks,
+  });
 
   final AppSettings settings;
+
+  /// Saved places and routes, privacy zones and their guard.
+  final UserData user;
+
+  @visibleForTesting
+  final MapScreenTestHooks? testHooks;
 
   @override
   State<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> {
-  final MapViewController _map = createMapController();
+/// A "choose a point on the map" request in progress.
+class _Pick {
+  _Pick(this.title, this.returnTo);
+
+  final String title;
+  final _Section returnTo;
+  final completer = Completer<PickedPlace?>();
+}
+
+class _MapScreenState extends State<MapScreen> implements MapServices {
+  late final MapViewController _map =
+      widget.testHooks?.controller ?? createMapController();
   final _traffic = TrafficController();
-  final _route = RouteController();
-  OfflineMap? _offline;
+  late final RouteController _route =
+      widget.testHooks?.route ?? RouteController();
+  List<OfflineMap> _offline = const [];
+  bool _offlineLoading = true;
   Timer? _saveCamera;
   Object? _fittedRoute;
   Object? _shownStep;
   LatLng? _picked;
   String? _pickedLabel;
-  PlacesDatabase? _places;
+  List<PlacesDatabase> _places = const [];
   final _photon = PhotonGeocoder();
+  late final FileExchange _files =
+      widget.testHooks?.files ?? createFileExchange();
   // Debug hook: MAPSOLY_SEARCH="query" opens search with that text.
   final _initialQuery = Platform.environment['MAPSOLY_SEARCH'] ?? '';
   late _Section _section = _initialQuery.isNotEmpty
@@ -58,27 +118,93 @@ class _MapScreenState extends State<MapScreen> {
       : _Section.navigator;
   bool get _searching => _section == _Section.search;
 
+  // The routes and settings sections keep their own page stacks, so that a
+  // screen opened there stays as it was while the user picks a point on the
+  // map.
+  final _routesNav = GlobalKey<NavigatorState>();
+  final _settingsNav = GlobalKey<NavigatorState>();
+  final _routesTab = ValueNotifier(0);
+  // Bumped when something the section roots are built from is replaced.
+  final _epoch = ValueNotifier(0);
+  final _glass = GlassRegistry();
+  final _mapKey = GlobalKey();
+  final _bannerKey = GlobalKey();
+  _Pick? _pick;
+
+  // Ending the route asks first; the question goes away by itself.
+  bool _confirmEnd = false;
+  Timer? _confirmEndTimer;
+
+  // Camera modes.
+  LocationMode _locationMode = LocationMode.free;
+  final _follow = FollowState();
+  final _driveCamera = DriveCamera();
+  final _heading = AngleSmoother();
+  CompassSource? _compass;
+  StreamSubscription<double>? _compassSub;
+  double? _compassHeading;
+  bool _driving = false;
+  bool _tilted = false;
+  bool _tiltRestored = false;
+  Size _viewSize = Size.zero;
+
   void _open(_Section section) => setState(() => _section = section);
 
   /// True when "back" has something to close inside this screen.
   bool get _canGoBack =>
+      _pick != null ||
       _section != _Section.navigator ||
       _picked != null ||
       _route.guiding ||
       _route.active;
 
-  /// "Back": undo the most recent step, one at a time — leave a section,
-  /// drop the picked point, stop guidance, then close the route.
+  /// "Back": undo the most recent step, one at a time — cancel picking a
+  /// point, close a screen inside a section, leave the section, drop the
+  /// picked point, end guidance (asking first), then close the route.
   void _goBack() {
-    if (_section != _Section.navigator) {
-      _open(_Section.navigator);
-    } else if (_picked != null) {
-      setState(() => _picked = null);
-    } else if (_route.guiding) {
-      _route.stopGuidance();
-    } else if (_route.active) {
-      _route.clear();
+    if (_pick != null) {
+      _finishPick(null);
+      return;
     }
+    switch (_section) {
+      case _Section.routes || _Section.settings:
+        final nav = _section == _Section.routes
+            ? _routesNav.currentState
+            : _settingsNav.currentState;
+        if (nav != null && nav.canPop()) {
+          nav.maybePop();
+        } else {
+          _open(_Section.navigator);
+        }
+      case _Section.search:
+        _open(_Section.navigator);
+      case _Section.navigator:
+        if (_picked != null) {
+          setState(() => _picked = null);
+        } else if (_route.arrival != null) {
+          _route.clear();
+        } else if (_route.guiding) {
+          _confirmEnd ? _endGuidance() : _askEnd();
+        } else if (_route.active) {
+          _route.clear();
+        }
+    }
+  }
+
+  void _askEnd() {
+    _confirmEndTimer?.cancel();
+    _confirmEndTimer = Timer(const Duration(seconds: 6), _cancelEnd);
+    setState(() => _confirmEnd = true);
+  }
+
+  void _cancelEnd() {
+    _confirmEndTimer?.cancel();
+    if (mounted && _confirmEnd) setState(() => _confirmEnd = false);
+  }
+
+  void _endGuidance() {
+    _cancelEnd();
+    _route.stopGuidance();
   }
 
   PositioningNotifier? _positioning;
@@ -99,81 +225,344 @@ class _MapScreenState extends State<MapScreen> {
     _traffic.addListener(() => widget.settings.traffic = _traffic.source);
     _route.addListener(_onRouteChanged);
     _route.trafficSampler = _traffic.sampler;
+    _glass.addListener(_rebuild);
+    _map.cameraChanges.addListener(_onCameraMoved);
     _startPositioning();
-    _startObd();
     widget.settings.addListener(_applyLocationSettings);
     _loadOffline();
   }
 
-  /// Opens the installed region pack (map, routing graph, search index).
-  /// Called again after packs were downloaded or deleted.
-  void _loadOffline() {
-    // Stop drawing from the old archive before closing it.
-    final old = _offline;
-    if (old != null) setState(() => _offline = null);
-    old?.archive.close();
-    _places?.close();
-    _places = null;
-    _route.places = null;
-    OfflineMap.load().then((map) {
-      if (!mounted) return;
-      setState(() => _offline = map);
-      _route.usePack(map?.packDirectory);
-      if (map != null) {
-        try {
-          _places = PlacesDatabase.tryOpen(
-            '${map.packDirectory.path}/places.sqlite',
-          );
-          _route.places = _places;
-        } on Exception catch (e) {
-          debugPrint('Search index not opened: $e');
-        }
-      }
-      // Debug hook: MAPSOLY_ROUTE="lat,lon;lat,lon" plans a route at startup.
-      final preset = Platform.environment['MAPSOLY_ROUTE']?.split(';');
-      if (preset != null && preset.length == 2 && !_presetApplied) {
-        _presetApplied = true;
-        LatLng parse(String s) {
-          final p = s.split(',').map(double.parse).toList();
-          return LatLng(p[0], p[1]);
-        }
+  void _rebuild() {
+    if (mounted) setState(() {});
+  }
 
-        _route.setFrom(parse(preset[0]));
-        _route.setTo(parse(preset[1]));
-      }
-      // First launch with a region pack: start inside the region.
-      if (map != null && widget.settings.center == null) {
-        final b = map.archive.bounds;
-        _map.move(LatLng((b[1] + b[3]) / 2, (b[0] + b[2]) / 2), 12);
-      }
-    }, onError: (Object e) => debugPrint('Offline map failed to open: $e'));
+  /// Opens the installed region packs (maps, routing graph, search
+  /// indexes). Called again after packs were downloaded or deleted.
+  void _loadOffline() {
+    // Stop drawing from the old archives before closing them.
+    final old = _offline;
+    if (old.isNotEmpty) setState(() => _offline = const []);
+    for (final map in old) {
+      map.archive.close();
+    }
+    for (final db in _places) {
+      db.close();
+    }
+    _places = const [];
+    _route
+      ..places = null
+      ..morePlaces = const [];
+    if (widget.testHooks != null) {
+      _offlineLoading = false;
+      return;
+    }
+    setState(() => _offlineLoading = true);
+    OfflineMap.loadAll().then(
+      (maps) {
+        if (!mounted) {
+          for (final map in maps) {
+            map.archive.close();
+          }
+          return;
+        }
+        final places = <PlacesDatabase>[];
+        for (final map in maps) {
+          try {
+            final db = PlacesDatabase.tryOpen(
+              '${map.packDirectory.path}/places.sqlite',
+            );
+            if (db != null) places.add(db);
+          } on Exception catch (e) {
+            debugPrint('Search index not opened: $e');
+          }
+        }
+        setState(() {
+          _offline = maps;
+          _offlineLoading = false;
+          _places = places;
+        });
+        _epoch.value++;
+        _route
+          ..usePack(maps.isEmpty ? null : maps.first.packDirectory)
+          ..places = places.isEmpty ? null : places.first
+          ..morePlaces = places.skip(1).toList();
+        // Debug hook: MAPSOLY_ROUTE="lat,lon;lat,lon" plans a route at
+        // startup.
+        final preset = Platform.environment['MAPSOLY_ROUTE']?.split(';');
+        if (preset != null && preset.length == 2 && !_presetApplied) {
+          _presetApplied = true;
+          LatLng parse(String s) {
+            final p = s.split(',').map(double.parse).toList();
+            return LatLng(p[0], p[1]);
+          }
+
+          _route.setFrom(parse(preset[0]));
+          _route.setTo(parse(preset[1]));
+        }
+        // First launch with a region pack: start inside the region.
+        if (maps.isNotEmpty && widget.settings.center == null) {
+          final b = maps.first.archive.bounds;
+          _map.move(LatLng((b[1] + b[3]) / 2, (b[0] + b[2]) / 2), 12);
+        }
+      },
+      onError: (Object e) {
+        debugPrint('Offline maps failed to open: $e');
+        if (mounted) setState(() => _offlineLoading = false);
+      },
+    );
   }
 
   @override
   void dispose() {
     _saveCamera?.cancel();
+    _confirmEndTimer?.cancel();
+    _pick?.completer.complete(null);
     widget.settings.removeListener(_applyLocationSettings);
+    _map.cameraChanges.removeListener(_onCameraMoved);
+    _compassSub?.cancel();
+    _compass?.stop();
     _obd?.dispose();
+    widget.user.guard.detach();
     final positioning = _positioning;
     if (positioning != null) {
       positioning.removeListener(_onPosition);
       positioning.dispose();
-      positioning.engine.dispose();
+      if (widget.testHooks == null) positioning.engine.dispose();
     }
     _simulation?.cancel();
-    _places?.close();
+    for (final db in _places) {
+      db.close();
+    }
     _photon.close();
     _traffic.dispose();
     _route.dispose();
-    _offline?.archive.close();
-    _map.dispose();
+    for (final map in _offline) {
+      map.archive.close();
+    }
+    if (widget.testHooks == null) _map.dispose();
+    _routesTab.dispose();
+    _epoch.dispose();
+    _glass.dispose();
     super.dispose();
   }
 
-  void _zoom(double delta) =>
-      _map.move(_map.center, (_map.zoom + delta).clamp(3, 19));
+  // ------------------------------------------------------------------ camera
 
-  void _pan(double dx, double dy) => _map.panBy(Offset(dx, dy) / 4);
+  void _zoom(double delta) {
+    _userMovedMap(pan: false);
+    _map.move(_map.center, (_map.zoom + delta).clamp(3, 19));
+  }
+
+  void _pan(double dx, double dy) {
+    _userMovedMap();
+    _map.panBy(Offset(dx, dy) / 4);
+  }
+
+  /// The user moved the map by hand: stop moving it for them. Following
+  /// the position survives a zoom, but not a pan; the driving camera
+  /// pauses for either.
+  void _userMovedMap({bool pan = true}) {
+    if (_driving) {
+      final wasFollowing = _follow.following;
+      _follow.userMoved(DateTime.now());
+      if (wasFollowing) setState(() {});
+    } else if (pan && _locationMode != LocationMode.free) {
+      _setLocationMode(LocationMode.free);
+    }
+  }
+
+  void _onCameraMoved() {
+    if (!_map.ready) return;
+    if (!_tiltRestored) {
+      // The map is up: bring back the 3D view it was left in.
+      _tiltRestored = true;
+      if (widget.settings.tilted && _map.maxPitch > 0 && !_driving) {
+        _map.moveCamera(pitch: math.min(tiltedPitch, _map.maxPitch));
+      }
+    }
+    final tilted = _map.pitch > 1;
+    if (tilted != _tilted) setState(() => _tilted = tilted);
+  }
+
+  void _toggle3d() {
+    if (_map.maxPitch <= 0) return;
+    if (_driving) {
+      // While driving the button is the "3D in a trip" switch.
+      widget.settings.drive3d = !widget.settings.drive3d;
+      _follow.resume();
+      _onRouteChanged();
+      return;
+    }
+    final tilt = _map.pitch <= 1;
+    widget.settings.tilted = tilt;
+    _map.moveCamera(pitch: tilt ? math.min(tiltedPitch, _map.maxPitch) : 0);
+  }
+
+  /// North-up again; the tilt stays as it is.
+  void _northUp() {
+    if (_locationMode == LocationMode.heading) {
+      _setLocationMode(LocationMode.centered);
+    } else if (_driving && widget.settings.drive3d && _follow.following) {
+      // The driving camera would turn it straight back.
+      widget.settings.drive3d = false;
+      _onRouteChanged();
+    } else {
+      _map.moveCamera(bearing: 0);
+    }
+  }
+
+  void _setLocationMode(LocationMode mode) {
+    if (mode == _locationMode) return;
+    final wasHeading = _locationMode == LocationMode.heading;
+    setState(() => _locationMode = mode);
+    if (mode == LocationMode.heading) {
+      _heading.reset();
+      _startCompass();
+    } else if (wasHeading) {
+      _stopCompass();
+      if (mode == LocationMode.centered) _map.moveCamera(bearing: 0);
+    }
+  }
+
+  void _startCompass() {
+    try {
+      final compass = _compass ??=
+          widget.testHooks?.compass ??
+          (widget.testHooks == null && Platform.isLinux
+              ? SensorProxyCompass()
+              : null);
+      if (compass == null) return;
+      _compassSub ??= compass.headings.listen((h) {
+        _compassHeading = h;
+        _followPosition();
+      });
+      unawaited(
+        compass.start().catchError((Object e) {
+          debugPrint('Compass not started: $e');
+        }),
+      );
+    } on Object catch (e) {
+      debugPrint('Compass not available: $e');
+    }
+  }
+
+  void _stopCompass() {
+    _compassSub?.cancel();
+    _compassSub = null;
+    _compassHeading = null;
+    final compass = _compass;
+    if (compass != null) {
+      unawaited(compass.stop().catchError((Object _) {}));
+    }
+  }
+
+  /// Outside guidance: keeps the position in view in the "centred" and
+  /// "heading" modes of the location button.
+  void _followPosition() {
+    if (_driving || _locationMode == LocationMode.free || !_map.ready) return;
+    final fix = _positioning?.estimate;
+    if (fix == null) return;
+    double? bearing;
+    if (_locationMode == LocationMode.heading) {
+      // The course is trustworthy only while moving; standing still the
+      // device compass says where the device points.
+      final moving = (fix.speedMps ?? 0) > 1.5 && fix.courseDeg != null;
+      final raw = moving ? fix.courseDeg : _compassHeading;
+      if (raw != null) bearing = _heading.update(raw);
+    }
+    _map.moveCamera(center: LatLng(fix.lat, fix.lon), bearing: bearing);
+  }
+
+  /// One tap centres the map on the position, the next makes it turn with
+  /// the direction of travel; without a position, explains why.
+  void _onLocationButton() {
+    final fix = _positioning?.estimate;
+    if (fix == null) {
+      _showLocation();
+      return;
+    }
+    if (_driving) {
+      _resumeFollowing();
+      return;
+    }
+    final next = nextLocationMode(_locationMode);
+    if (_locationMode == LocationMode.free) {
+      final zoom = _map.zoom < 14 ? 15.0 : _map.zoom;
+      _map.move(LatLng(fix.lat, fix.lon), zoom);
+    }
+    _setLocationMode(next);
+    _followPosition();
+  }
+
+  void _resumeFollowing() {
+    _follow.resume();
+    setState(() {});
+    _onRouteChanged();
+  }
+
+  /// The camera behind the car, about once per position update.
+  void _drive(RouteProgress progress) {
+    final now = DateTime.now();
+    final speed = _route.speedKmh ?? 0;
+    final wasPaused = _follow.paused;
+    _follow.tick(now, moving: speed > DriveCamera.movingKmh);
+    if (wasPaused && _follow.following) setState(() {});
+    if (_follow.paused || !_map.ready) return;
+    final tilt = widget.settings.drive3d && _map.maxPitch > 0;
+    final frame = _driveCamera.frame(
+      point: progress.point,
+      speedKmh: speed,
+      tilt: tilt,
+      maxPitch: _map.maxPitch,
+      routeBearing: _route.routeBearing,
+      toManeuverM: _route.toNextManeuverM,
+      courseDeg: _positioning?.estimate?.courseDeg,
+    );
+    // No duration: the engine stretches each move to the next update, so
+    // the motion is continuous.
+    _map.moveCamera(
+      center: frame.center,
+      zoom: frame.zoom,
+      bearing: frame.bearing,
+      pitch: frame.pitch,
+    );
+  }
+
+  void _setDriving(bool driving) {
+    if (driving == _driving) return;
+    _driving = driving;
+    if (driving) {
+      _follow.resume();
+      _driveCamera.reset();
+      if (_locationMode != LocationMode.free) {
+        _locationMode = LocationMode.free;
+        _stopCompass();
+      }
+      _applyDrivePadding();
+    } else {
+      _map.setPadding(EdgeInsets.zero);
+      if (_map.ready) {
+        _map.moveCamera(
+          bearing: 0,
+          pitch: widget.settings.tilted && _map.maxPitch > 0
+              ? math.min(tiltedPitch, _map.maxPitch)
+              : 0,
+        );
+      }
+    }
+    // Called while the route notifies; the screen is rebuilt right after.
+  }
+
+  /// Puts the car in the lower third of what the banner leaves free. The
+  /// bottom bar is already kept clear by the engine.
+  void _applyDrivePadding() {
+    if (!_driving || _viewSize.isEmpty) return;
+    final banner = _bannerKey.currentContext?.findRenderObject();
+    final top = banner is RenderBox && banner.hasSize
+        ? banner.size.height + 16
+        : 150.0;
+    _map.setPadding(drivePadding(_viewSize, top: top, bottom: 64));
+  }
 
   /// What the map should show right now.
   MapScene _scene(BuildContext context) {
@@ -181,9 +570,20 @@ class _MapScreenState extends State<MapScreen> {
     final routes = _route.routes;
     final selected = _route.selectedIndex;
     final fix = _positioning?.estimate;
+    // The glass surfaces, in the map view's own coordinates.
+    final view = _mapKey.currentContext?.findRenderObject();
+    final origin = view is RenderBox && view.attached
+        ? view.localToGlobal(Offset.zero)
+        : Offset.zero;
     return MapScene(
       dark: Theme.of(context).brightness == Brightness.dark,
-      offline: _offline,
+      offline: _offline.isEmpty ? null : _offline.first,
+      offlineMaps: _offline,
+      offlineLoading: _offlineLoading,
+      blurRects: _section == _Section.navigator
+          ? [for (final r in _glass.rects.take(6)) r.shift(-origin)]
+          : const [],
+      buildings3d: _tilted,
       traffic: version == null || _traffic.source == TrafficSource.off
           ? null
           : TrafficOverlay(_traffic.source, version, _traffic.client),
@@ -220,11 +620,13 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
     _updateSimulation();
-    if (route == null) return;
-    // Guidance with a fix: the map follows the matched position.
+    if (!_route.guiding && _confirmEnd) _cancelEnd();
+    // Guidance with a fix: the camera sits behind the car.
     final progress = _route.progress;
+    _setDriving(progress != null && _route.arrival == null);
+    if (route == null) return;
     if (progress != null) {
-      _map.move(progress.point, _map.zoom < 15 ? 16 : _map.zoom);
+      if (_driving) _drive(progress);
       return;
     }
     // Guidance by hand: keep the current maneuver in view.
@@ -240,28 +642,46 @@ class _MapScreenState extends State<MapScreen> {
     _shownStep = null;
     if (route == _fittedRoute) return;
     _fittedRoute = route;
-    _map.fit(route.shape, const EdgeInsets.fromLTRB(40, 90, 70, 200));
+    // Clear of the buttons on the right and the route card at the bottom.
+    _map.fit(route.shape, const EdgeInsets.fromLTRB(40, 80, 80, 250));
   }
 
-  /// Starts Wi-Fi/cell/GNSS positioning. Any failure leaves the app working
-  /// without a position.
+  // -------------------------------------------------------------- services
+
+  /// Starts Wi-Fi/cell/GNSS positioning and then the car adapter, whose
+  /// trip log takes its (zone-filtered) position from the same engine. Any
+  /// failure leaves the app working without a position.
   Future<void> _startPositioning() async {
-    if (!Platform.isLinux) return;
+    final hooks = widget.testHooks;
+    PositioningEngine? engine = hooks?.engine;
     try {
-      final dir = await getApplicationSupportDirectory();
-      dir.createSync(recursive: true);
-      final engine = PositioningEngine.linux(
-        dbPath: '${dir.path}/positioning.sqlite',
-      );
-      final notifier = PositioningNotifier(engine)..addListener(_onPosition);
-      if (!mounted) {
-        notifier.dispose();
-        await engine.dispose();
-        return;
+      final dir = widget.user.supportDirectory;
+      if (engine == null && hooks == null && Platform.isLinux && dir != null) {
+        dir.createSync(recursive: true);
+        engine = PositioningEngine.linux(
+          dbPath: '${dir.path}/positioning.sqlite',
+        );
       }
-      setState(() => _positioning = notifier);
-      _applyLocationSettings();
-      await engine.start();
+      if (engine != null) {
+        // Before anything is collected or sent: the privacy zones.
+        widget.user.guard.attach(engine);
+        final notifier = PositioningNotifier(engine)..addListener(_onPosition);
+        if (!mounted) {
+          notifier.dispose();
+          if (hooks == null) await engine.dispose();
+          return;
+        }
+        setState(() => _positioning = notifier);
+        _epoch.value++;
+        _applyLocationSettings();
+      }
+    } on Object catch (e) {
+      debugPrint('Positioning not created: $e');
+      engine = null;
+    }
+    _startObd(engine);
+    try {
+      if (hooks == null) await engine?.start();
     } on Object catch (e) {
       debugPrint('Positioning not started: $e');
     }
@@ -270,22 +690,28 @@ class _MapScreenState extends State<MapScreen> {
   /// Connects to the ELM327 adapter according to the settings. Its speed
   /// feeds the positioning filter, which is what keeps the position moving
   /// when there is no satellite fix.
-  Future<void> _startObd() async {
-    final dir = await getApplicationSupportDirectory();
+  void _startObd(PositioningEngine? engine) {
     if (!mounted) return;
-    final service = ObdService(
-      logDirectory: Directory('${dir.path}/obd-logs'),
-      position: () {
-        final fix = _positioning?.estimate;
-        return fix == null ? null : (lat: fix.lat, lon: fix.lon);
-      },
-      onSpeed: (sample) => _positioning?.engine.addSpeedSample(
-        sample.speedMps,
-        time: sample.time,
-      ),
-    );
+    final hooks = widget.testHooks;
+    final logs = widget.user.tripLogDirectory;
+    if (hooks != null ? hooks.obd == null : logs == null) return;
+    final service =
+        hooks?.obd ??
+        ObdService(
+          logDirectory: logs!,
+          // Null inside a privacy zone: the row is logged without
+          // coordinates.
+          position: engine == null
+              ? null
+              : widget.user.guard.enginePosition(engine),
+          onSpeed: (sample) => _positioning?.engine.addSpeedSample(
+            sample.speedMps,
+            time: sample.time,
+          ),
+        );
     setState(() => _obd = service);
-    await service.apply(widget.settings.obd);
+    _epoch.value++;
+    unawaited(service.apply(widget.settings.obd));
   }
 
   void _applyLocationSettings() {
@@ -304,6 +730,7 @@ class _MapScreenState extends State<MapScreen> {
       accuracyM: fix?.accuracyM ?? 30,
       speedMps: fix?.speedMps,
     );
+    _followPosition();
   }
 
   /// Debug hook: `MAPSOLY_SIMULATE=60` (km/h) drives a fake position along the
@@ -360,36 +787,114 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  /// Centres the map on the current position, or explains why there is none.
-  void _goToMyPosition() {
-    final fix = _positioning?.estimate;
-    if (fix == null) {
-      _showLocation();
-      return;
-    }
-    final zoom = _map.zoom < 14 ? 15.0 : _map.zoom;
-    _map.move(LatLng(fix.lat, fix.lon), zoom);
-  }
-
   /// Where to rank search results around: the position, else the map view.
+  /// The hint also goes to the online search, so a point inside a privacy
+  /// zone is never used.
   LatLng? _searchNear() {
+    final guard = widget.user.guard;
     final fix = _positioning?.estimate;
-    if (fix != null) return LatLng(fix.lat, fix.lon);
+    if (fix != null) {
+      return guard.shareable(
+        LatLng(fix.lat, fix.lon),
+        accuracyM: fix.accuracyM,
+      );
+    }
     // Before the first layout (search opened at startup) there is no camera.
-    return _map.ready ? _map.center : widget.settings.center;
+    return guard.shareable(_map.ready ? _map.center : widget.settings.center);
   }
 
-  void _onPlaceSelected(PlaceResult place) {
+  static String _labelOf(PlaceResult place) {
     final context = place.context;
+    return context == null || context.isEmpty
+        ? place.name
+        : '${place.name} — $context';
+  }
+
+  /// Shows a point on the map with the card that offers what to do with it.
+  void _showPoint(LatLng point, String? label) {
     setState(() {
       _section = _Section.navigator;
-      _picked = place.point;
-      _pickedLabel = context == null || context.isEmpty
-          ? place.name
-          : '${place.name} — $context';
+      _picked = point;
+      _pickedLabel = label;
     });
-    _map.move(place.point, _map.zoom < 15 ? 16 : _map.zoom);
+    _userMovedMap();
+    _map.move(point, _map.zoom < 15 ? 16 : _map.zoom);
   }
+
+  /// "Home" / "Work" / a saved place in one tap: a route from here, or the
+  /// planner asking for a start when there is no position.
+  void _goToPlace(SavedPlace place) {
+    _settingsNav.currentState?.popUntil((r) => r.isFirst);
+    setState(() => _picked = null);
+    _route.setStops([RouteStop(place.point, label: place.name)]);
+    if (_route.needStart) {
+      _routesTab.value = 0;
+      _open(_Section.routes);
+    } else {
+      _open(_Section.navigator);
+    }
+  }
+
+  Future<void> _savePicked() async {
+    final point = _picked;
+    if (point == null) return;
+    final saved = await savePlaceDialog(
+      context,
+      widget.user.places,
+      point: point,
+      name: _pickedLabel?.split(' — ').first,
+      address: _pickedLabel,
+    );
+    if (saved != null && mounted) {
+      showNote(context, 'Место «${saved.name}» сохранено');
+    }
+  }
+
+  // ------------------------------------------------------------ MapServices
+
+  @override
+  LatLng? get myPosition {
+    final fix = _positioning?.estimate;
+    return fix == null ? null : LatLng(fix.lat, fix.lon);
+  }
+
+  @override
+  Future<PickedPlace?> pickOnMap({required String title, LatLng? around}) {
+    _pick?.completer.complete(null);
+    final pick = _Pick(title, _section);
+    setState(() {
+      _pick = pick;
+      _picked = null;
+      _section = _Section.navigator;
+    });
+    if (around != null && _map.ready) {
+      _map.move(around, _map.zoom < 14 ? 15 : _map.zoom);
+    }
+    return pick.completer.future;
+  }
+
+  void _finishPick(LatLng? point) {
+    final pick = _pick;
+    if (pick == null) return;
+    setState(() {
+      _pick = null;
+      _section = pick.returnTo;
+    });
+    pick.completer.complete(point == null ? null : PickedPlace(point));
+  }
+
+  @override
+  Widget searchPanel({
+    required ValueChanged<PickedPlace> onSelected,
+    required VoidCallback onClose,
+  }) => SearchPanel(
+    database: _places.isEmpty ? null : _places.first,
+    moreDatabases: _places.skip(1).toList(),
+    online: _photon,
+    near: _searchNear(),
+    onSelected: (r) => onSelected(PickedPlace(r.point, label: _labelOf(r))),
+    onClose: onClose,
+  );
 
   void _cycleTheme() {
     const order = [ThemeMode.system, ThemeMode.light, ThemeMode.dark];
@@ -398,250 +903,514 @@ class _MapScreenState extends State<MapScreen> {
         order[(order.indexOf(settings.themeMode) + 1) % order.length];
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return CallbackShortcuts(
-      // Single-letter shortcuts would swallow typing in the search field.
-      bindings: _searching
-          ? const {}
-          : {
-              const SingleActivator(LogicalKeyboardKey.escape): _goBack,
-              const SingleActivator(LogicalKeyboardKey.slash): () =>
-                  _open(_Section.search),
-              const SingleActivator(
-                LogicalKeyboardKey.keyF,
-                control: true,
-              ): () =>
-                  _open(_Section.search),
-              const SingleActivator(LogicalKeyboardKey.keyL): _goToMyPosition,
-              const SingleActivator(LogicalKeyboardKey.equal): () => _zoom(1),
-              const SingleActivator(LogicalKeyboardKey.add): () => _zoom(1),
-              const SingleActivator(LogicalKeyboardKey.minus): () => _zoom(-1),
-              const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
-                  _pan(-1, 0),
-              const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
-                  _pan(1, 0),
-              const SingleActivator(LogicalKeyboardKey.arrowUp): () =>
-                  _pan(0, -1),
-              const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
-                  _pan(0, 1),
-              const SingleActivator(LogicalKeyboardKey.keyT): _cycleTraffic,
-              const SingleActivator(LogicalKeyboardKey.keyD): _cycleTheme,
-            },
-      child: ListenableBuilder(
-        // Rebuilt with the route, so "back" always knows what is open.
-        listenable: _route,
-        // The system or hardware back key lands here while there is
-        // something to close; with nothing left it leaves the app.
-        builder: (context, child) => PopScope(
-          canPop: !_canGoBack,
-          onPopInvokedWithResult: (didPop, _) {
-            if (!didPop) _goBack();
-          },
-          child: child!,
+  // -------------------------------------------------------------------- UI
+
+  /// A section's own page stack, kept alive while another section shows.
+  Widget _sectionPages(
+    _Section section,
+    GlobalKey<NavigatorState> key,
+    WidgetBuilder root,
+  ) => _Layer(
+    visible: _section == section,
+    child: Navigator(
+      key: key,
+      onGenerateRoute: (_) => MaterialPageRoute<void>(
+        builder: (context) => ListenableBuilder(
+          listenable: _epoch,
+          builder: (context, _) => root(context),
         ),
-        child: Focus(
-          autofocus: true,
-          child: Scaffold(
-            // The map continues under the translucent bottom bar.
-            extendBody: true,
-            body: ListenableBuilder(
-              listenable: Listenable.merge([_traffic, _route, _positioning]),
-              builder: (context, _) => LayoutBuilder(
-                builder: (context, box) {
-                  // Square and landscape screens (Titan 2 is 720x686 logical px) have
-                  // no spare height: keep every control on the side edges.
-                  final short = box.maxHeight < box.maxWidth * 1.3;
-                  return Stack(
-                    children: [
-                      // While search covers the screen the map is not drawn, so
-                      // typing does not compete with map rendering.
-                      buildMapView(
-                        visible: _section == _Section.navigator,
-                        controller: _map,
-                        scene: _scene(context),
-                        initialCenter:
-                            widget.settings.center ??
-                            const LatLng(55.7522, 37.6156),
-                        initialZoom: widget.settings.zoom ?? 11,
-                        onLongPress: (point) => setState(() {
-                          _picked = point;
-                          _pickedLabel = null;
-                        }),
-                        onCameraChanged: (center, zoom) {
-                          _saveCamera?.cancel();
-                          _saveCamera = Timer(
-                            const Duration(seconds: 1),
-                            () => widget.settings.saveCamera(center, zoom),
-                          );
-                        },
+      ),
+    ),
+  );
+
+  /// Saved places offered in search before anything is typed.
+  Widget? _savedPlacesList() {
+    final places = widget.user.places.places;
+    if (places.isEmpty) return null;
+    return ListView(
+      children: [
+        const SectionHeader('Мои места'),
+        for (final p in places)
+          BigRow(
+            icon: placeKindIcon(p.kind),
+            title: p.name,
+            subtitle: p.address,
+            trailing: const SizedBox.shrink(),
+            onTap: () => _showPoint(p.point, p.name),
+          ),
+      ],
+    );
+  }
+
+  /// What lies on the map in the navigator section.
+  List<Widget> _mapOverlay(BuildContext context) {
+    final pick = _pick;
+    final status = _positioning?.status;
+    // A wide window keeps cards and the banner clear of the buttons on the
+    // right. A narrow phone gives them the full width and moves the
+    // buttons out of their way instead.
+    final narrow = _viewSize.width < 500;
+    final side = narrow ? 0.0 : 72.0;
+    final showsBanner = _route.guiding && _route.arrival == null;
+    final showsCard =
+        _pick == null &&
+        (_route.arrival != null ||
+            (!_route.guiding && (_picked != null || _route.active)));
+    final buttons = Align(
+      alignment: Alignment.centerRight,
+      child: Padding(
+        padding: EdgeInsets.only(
+          top: narrow && showsBanner ? 170 : 0,
+          bottom: narrow && showsCard ? 270 : 0,
+        ),
+        child: MapButtons(
+          camera: _map,
+          onZoom: _zoom,
+          onToggle3d: _toggle3d,
+          onNorthUp: _northUp,
+          onLocation: _onLocationButton,
+          onLocationDetails: _showLocation,
+          hasFix: status?.estimate != null,
+          mode: _driving
+              ? (_follow.following ? LocationMode.heading : LocationMode.free)
+              : _locationMode,
+          privateArea: status?.privateArea ?? false,
+          tilted: _driving
+              ? widget.settings.drive3d && _map.maxPitch > 0
+              : _tilted,
+        ),
+      ),
+    );
+
+    if (pick != null) {
+      return [
+        const IgnorePointer(child: Center(child: _Crosshair())),
+        buttons,
+        Align(
+          alignment: Alignment.topLeft,
+          child: Padding(
+            padding: EdgeInsets.only(right: side),
+            child: Glass(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Ui.pad,
+                  vertical: 10,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      pick.title,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    Text(
+                      'Подвиньте карту так, чтобы место оказалось под прицелом',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
                       ),
-                      SafeArea(
-                        minimum: const EdgeInsets.all(8),
-                        child: Stack(
-                          children: [
-                            if (!_route.guiding)
-                              Align(
-                                alignment: short
-                                    ? Alignment.topLeft
-                                    : Alignment.bottomCenter,
-                                child: Padding(
-                                  padding: EdgeInsets.only(
-                                    bottom: short ? 0 : 24,
-                                  ),
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      _TrafficSwitch(
-                                        controller: _traffic,
-                                        vertical: short,
-                                      ),
-                                      if (_obd != null)
-                                        VehicleChip(service: _obd!),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            if (_route.guiding && _route.selected != null)
-                              Align(
-                                alignment: Alignment.topCenter,
-                                child: Padding(
-                                  padding: const EdgeInsets.only(right: 56),
-                                  child: GuidanceBanner(controller: _route),
-                                ),
-                              )
-                            else if (_picked != null || _route.active)
-                              Align(
-                                alignment: short
-                                    ? Alignment.bottomLeft
-                                    : Alignment.bottomCenter,
-                                child: Padding(
-                                  padding: EdgeInsets.only(
-                                    bottom: short ? 28 : 84,
-                                    right: short ? 64 : 0,
-                                  ),
-                                  child: ConstrainedBox(
-                                    constraints: const BoxConstraints(
-                                      maxWidth: 380,
-                                    ),
-                                    child: _picked != null
-                                        ? PickedPointCard(
-                                            point: _picked!,
-                                            label: _pickedLabel,
-                                            onTo: () {
-                                              _route.setTo(
-                                                _picked!,
-                                                label: _pickedLabel,
-                                              );
-                                              setState(() => _picked = null);
-                                            },
-                                            onFrom: () {
-                                              _route.setFrom(
-                                                _picked!,
-                                                label: _pickedLabel,
-                                              );
-                                              setState(() => _picked = null);
-                                            },
-                                            onClose: () =>
-                                                setState(() => _picked = null),
-                                          )
-                                        : RoutePanel(controller: _route),
-                                  ),
-                                ),
-                              ),
-                            if (_route.guiding && _obd != null)
-                              Align(
-                                alignment: Alignment.bottomLeft,
-                                child: VehicleChip(service: _obd!),
-                              ),
-                            Align(
-                              alignment: Alignment.centerRight,
-                              child: _MapButtons(
-                                onMyPosition: _goToMyPosition,
-                                onLocationDetails: _showLocation,
-                                hasFix: _positioning?.estimate != null,
-                                onZoom: _zoom,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      if (_searching)
-                        Positioned.fill(
-                          child: Material(
-                            color: Theme.of(context).colorScheme.surface,
-                            child: SafeArea(
-                              child: SearchPanel(
-                                database: _places,
-                                online: _photon,
-                                near: _searchNear(),
-                                initialQuery: _initialQuery,
-                                onSelected: _onPlaceSelected,
-                                onClose: () => _open(_Section.navigator),
-                              ),
-                            ),
-                          ),
-                        ),
-                      if (_section == _Section.routes ||
-                          _section == _Section.settings)
-                        Positioned.fill(
-                          child: Material(
-                            color: Theme.of(context).colorScheme.surface,
-                            child: SafeArea(
-                              child: _section == _Section.routes
-                                  ? RoutesScreen(
-                                      route: _route,
-                                      onShowOnMap: () =>
-                                          _open(_Section.navigator),
-                                      onSearch: () => _open(_Section.search),
-                                    )
-                                  : SettingsScreen(
-                                      settings: widget.settings,
-                                      traffic: _traffic,
-                                      positioning: _positioning,
-                                      obd: _obd,
-                                      onOpenPacks: _showPacks,
-                                    ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  );
-                },
+                    ),
+                  ],
+                ),
               ),
             ),
-            // The main sections sit under the thumb; more can be added here.
-            bottomNavigationBar: _FrostedBar(
-              child: NavigationBar(
-                backgroundColor: Colors.transparent,
-                surfaceTintColor: Colors.transparent,
-                elevation: 0,
-                height: 64,
-                selectedIndex: _section.index,
-                onDestinationSelected: (i) => _open(_Section.values[i]),
-                destinations: const [
-                  NavigationDestination(
-                    icon: Icon(Icons.search),
-                    label: 'Поиск',
-                  ),
-                  NavigationDestination(
-                    icon: Icon(Icons.navigation_outlined),
-                    selectedIcon: Icon(Icons.navigation),
-                    label: 'Навигатор',
-                  ),
-                  NavigationDestination(
-                    icon: Icon(Icons.alt_route),
-                    label: 'Маршруты',
-                  ),
-                  NavigationDestination(
-                    icon: Icon(Icons.settings_outlined),
-                    selectedIcon: Icon(Icons.settings),
-                    label: 'Настройки',
-                  ),
-                ],
+          ),
+        ),
+        Align(
+          alignment: Alignment.bottomCenter,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 560),
+            child: Glass(
+              child: Padding(
+                padding: const EdgeInsets.all(Ui.gap),
+                child: Row(
+                  children: [
+                    OutlinedButton(
+                      style: Ui.outlined,
+                      onPressed: () => _finishPick(null),
+                      child: const Text('Отмена'),
+                    ),
+                    const SizedBox(width: Ui.gap),
+                    Expanded(
+                      child: FilledButton.icon(
+                        style: Ui.filled,
+                        onPressed: _map.ready
+                            ? () => _finishPick(_map.center)
+                            : null,
+                        icon: const Icon(Icons.check),
+                        label: const Text('Выбрать эту точку'),
+                      ),
+                    ),
+                  ],
+                ),
               ),
+            ),
+          ),
+        ),
+      ];
+    }
+
+    final arrival = _route.arrival;
+    final guiding = _route.guiding && _route.selected != null;
+    final places = widget.user.places;
+    final quick = [?places.home, ?places.work];
+
+    // The card at the bottom left: at most one thing at a time.
+    Widget? card;
+    if (arrival != null) {
+      card = ArrivalCard(summary: arrival, onDone: _route.clear);
+    } else if (guiding) {
+      card = null;
+    } else if (_picked != null) {
+      card = PickedPointCard(
+        point: _picked!,
+        label: _pickedLabel,
+        onTo: () {
+          _route.setTo(_picked!, label: _pickedLabel);
+          setState(() => _picked = null);
+        },
+        onFrom: () {
+          _route.setFrom(_picked!, label: _pickedLabel);
+          setState(() => _picked = null);
+        },
+        onAddStop: _route.stops.length >= 2 && !_route.needStart
+            ? () {
+                _route.addStop(_picked!, label: _pickedLabel);
+                setState(() => _picked = null);
+              }
+            : null,
+        onSave: _savePicked,
+        onClose: () => setState(() => _picked = null),
+      );
+    } else if (_route.active) {
+      card = RoutePanel(
+        controller: _route,
+        onPlan: () {
+          _routesTab.value = 0;
+          _open(_Section.routes);
+        },
+      );
+    }
+
+    return [
+      if (!guiding)
+        Align(
+          alignment: Alignment.topLeft,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TrafficChip(controller: _traffic),
+              if (_obd != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: Ui.gap),
+                  child: VehicleChip(service: _obd!),
+                ),
+            ],
+          ),
+        ),
+      if (guiding && arrival == null)
+        Align(
+          alignment: Alignment.topLeft,
+          child: Padding(
+            padding: EdgeInsets.only(right: side),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: GuidanceBanner(
+                key: _bannerKey,
+                controller: _route,
+                confirmingEnd: _confirmEnd,
+                onAskEnd: _askEnd,
+                onCancelEnd: _cancelEnd,
+                onEnd: _endGuidance,
+              ),
+            ),
+          ),
+        ),
+      if (card != null)
+        Align(
+          alignment: Alignment.bottomLeft,
+          child: Padding(
+            padding: EdgeInsets.only(right: side),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 400),
+              child: card,
+            ),
+          ),
+        )
+      else if (guiding)
+        Align(
+          alignment: Alignment.bottomLeft,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              if (_obd != null)
+                Padding(
+                  padding: const EdgeInsets.only(right: Ui.gap),
+                  child: VehicleChip(service: _obd!),
+                ),
+              if (_driving && _follow.paused)
+                _GlassButton(
+                  icon: Icons.navigation,
+                  label: 'Вернуться к маршруту',
+                  accent: true,
+                  onTap: _resumeFollowing,
+                ),
+            ],
+          ),
+        )
+      else if (quick.isNotEmpty)
+        // Nothing planned: home and work are one tap away.
+        Align(
+          alignment: Alignment.bottomLeft,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final p in quick)
+                Padding(
+                  padding: const EdgeInsets.only(right: Ui.gap),
+                  child: _GlassButton(
+                    icon: placeKindIcon(p.kind),
+                    label: p.kind == SavedPlaceKind.home
+                        ? 'Домой'
+                        : 'На работу',
+                    onTap: () => _goToPlace(p),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      buttons,
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final onMap = _section == _Section.navigator;
+    final hooks = widget.testHooks;
+    return CallbackShortcuts(
+      // Single-letter shortcuts belong to the map: anywhere else they would
+      // swallow typing. Search handles Escape itself.
+      bindings: {
+        if (!_searching)
+          const SingleActivator(LogicalKeyboardKey.escape): _goBack,
+        if (onMap) ...{
+          const SingleActivator(LogicalKeyboardKey.slash): () =>
+              _open(_Section.search),
+          const SingleActivator(LogicalKeyboardKey.keyF, control: true): () =>
+              _open(_Section.search),
+          const SingleActivator(LogicalKeyboardKey.keyL): _onLocationButton,
+          const SingleActivator(LogicalKeyboardKey.equal): () => _zoom(1),
+          const SingleActivator(LogicalKeyboardKey.add): () => _zoom(1),
+          const SingleActivator(LogicalKeyboardKey.minus): () => _zoom(-1),
+          const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
+              _pan(-1, 0),
+          const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
+              _pan(1, 0),
+          const SingleActivator(LogicalKeyboardKey.arrowUp): () => _pan(0, -1),
+          const SingleActivator(LogicalKeyboardKey.arrowDown): () => _pan(0, 1),
+          const SingleActivator(LogicalKeyboardKey.keyT): _cycleTraffic,
+          const SingleActivator(LogicalKeyboardKey.keyD): _cycleTheme,
+          const SingleActivator(LogicalKeyboardKey.digit3): _toggle3d,
+          const SingleActivator(LogicalKeyboardKey.keyN): _northUp,
+        },
+      },
+      child: GlassScope(
+        registry: _glass,
+        child: ListenableBuilder(
+          // Rebuilt with the route, so "back" always knows what is open.
+          listenable: _route,
+          // The system or hardware back key lands here while there is
+          // something to close; with nothing left it leaves the app.
+          builder: (context, child) => PopScope(
+            canPop: !_canGoBack,
+            onPopInvokedWithResult: (didPop, _) {
+              if (!didPop) _goBack();
+            },
+            child: child!,
+          ),
+          child: Focus(
+            autofocus: true,
+            child: Scaffold(
+              // The map continues under the translucent bottom bar.
+              extendBody: true,
+              body: ListenableBuilder(
+                listenable: Listenable.merge([
+                  _traffic,
+                  _route,
+                  _positioning,
+                  widget.user.places,
+                ]),
+                builder: (context, _) => LayoutBuilder(
+                  builder: (context, box) {
+                    if (box.biggest != _viewSize) {
+                      _viewSize = box.biggest;
+                      _applyDrivePadding();
+                    }
+                    final scene = _scene(context);
+                    return Stack(
+                      children: [
+                        // While another section covers the screen the map is
+                        // not drawn, so typing does not compete with it.
+                        Listener(
+                          key: _mapKey,
+                          onPointerDown: (_) => _userMovedMap(),
+                          onPointerSignal: (_) => _userMovedMap(pan: false),
+                          child: hooks != null
+                              ? hooks.mapView(scene)
+                              : buildMapView(
+                                  visible: onMap,
+                                  controller: _map,
+                                  scene: scene,
+                                  initialCenter:
+                                      widget.settings.center ??
+                                      const LatLng(55.7522, 37.6156),
+                                  initialZoom: widget.settings.zoom ?? 11,
+                                  onLongPress: (point) {
+                                    if (_pick != null) return;
+                                    setState(() {
+                                      _picked = point;
+                                      _pickedLabel = null;
+                                    });
+                                  },
+                                  onCameraChanged: (center, zoom) {
+                                    _saveCamera?.cancel();
+                                    _saveCamera = Timer(
+                                      const Duration(seconds: 1),
+                                      () => widget.settings.saveCamera(
+                                        center,
+                                        zoom,
+                                      ),
+                                    );
+                                  },
+                                ),
+                        ),
+                        if (onMap)
+                          SafeArea(
+                            minimum: const EdgeInsets.all(Ui.gap),
+                            child: Stack(children: _mapOverlay(context)),
+                          ),
+                        if (_searching)
+                          Positioned.fill(
+                            child: Material(
+                              color: Theme.of(context).colorScheme.surface,
+                              child: SafeArea(
+                                child: SearchPanel(
+                                  database: _places.isEmpty
+                                      ? null
+                                      : _places.first,
+                                  moreDatabases: _places.skip(1).toList(),
+                                  online: _photon,
+                                  near: _searchNear(),
+                                  initialQuery: _initialQuery,
+                                  emptyQuery: _savedPlacesList(),
+                                  onSelected: (r) =>
+                                      _showPoint(r.point, _labelOf(r)),
+                                  onClose: () => _open(_Section.navigator),
+                                ),
+                              ),
+                            ),
+                          ),
+                        _sectionPages(
+                          _Section.routes,
+                          _routesNav,
+                          (_) => RoutesScreen(
+                            route: _route,
+                            user: widget.user,
+                            services: this,
+                            files: _files,
+                            tab: _routesTab,
+                            onGo: () => _open(_Section.navigator),
+                          ),
+                        ),
+                        _sectionPages(
+                          _Section.settings,
+                          _settingsNav,
+                          (_) => SettingsScreen(
+                            settings: widget.settings,
+                            traffic: _traffic,
+                            positioning: _positioning,
+                            obd: _obd,
+                            onOpenPacks: _showPacks,
+                            user: widget.user,
+                            services: this,
+                            files: _files,
+                            canTilt: _map.maxPitch > 0,
+                            onGoToPlace: _goToPlace,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+              // The main sections sit under the thumb. Picking a point is a
+              // step of its own: the bar gives way to its two buttons.
+              bottomNavigationBar: _pick != null
+                  ? null
+                  : _FrostedBar(
+                      child: NavigationBar(
+                        backgroundColor: Colors.transparent,
+                        surfaceTintColor: Colors.transparent,
+                        elevation: 0,
+                        height: 64,
+                        selectedIndex: _section.index,
+                        onDestinationSelected: (i) => _open(_Section.values[i]),
+                        destinations: const [
+                          NavigationDestination(
+                            icon: Icon(Icons.search),
+                            label: 'Поиск',
+                          ),
+                          NavigationDestination(
+                            icon: Icon(Icons.navigation_outlined),
+                            selectedIcon: Icon(Icons.navigation),
+                            label: 'Навигатор',
+                          ),
+                          NavigationDestination(
+                            icon: Icon(Icons.alt_route),
+                            label: 'Маршруты',
+                          ),
+                          NavigationDestination(
+                            icon: Icon(Icons.settings_outlined),
+                            selectedIcon: Icon(Icons.settings),
+                            label: 'Настройки',
+                          ),
+                        ],
+                      ),
+                    ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A section that covers the map: fades in quickly, and while hidden keeps
+/// its state but takes no taps, focus or frames.
+class _Layer extends StatelessWidget {
+  const _Layer({required this.visible, required this.child});
+
+  final bool visible;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: IgnorePointer(
+        ignoring: !visible,
+        child: ExcludeFocus(
+          excluding: !visible,
+          child: ExcludeSemantics(
+            excluding: !visible,
+            // The fade itself must keep ticking while the layer hides; only
+            // what is inside stops.
+            child: AnimatedOpacity(
+              opacity: visible ? 1 : 0,
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOut,
+              child: TickerMode(enabled: visible, child: child),
             ),
           ),
         ),
@@ -659,79 +1428,265 @@ class _FrostedBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    return ClipRect(
-      child: BackdropFilter(
-        // Blurs what Flutter itself draws behind the bar. A map drawn by the
-        // native engine lies outside Flutter's scene: there the bar is only
-        // translucent unless the engine softens that strip itself.
-        filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: colors.surfaceContainer.withValues(alpha: 0.72),
-            border: Border(
-              top: BorderSide(
-                color: colors.outlineVariant.withValues(alpha: 0.5),
-              ),
+    return Glass(
+      radius: 0,
+      opacity: 0.72,
+      border: false,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          border: Border(
+            top: BorderSide(
+              color: colors.outlineVariant.withValues(alpha: 0.5),
             ),
           ),
-          child: child,
+        ),
+        child: child,
+      ),
+    );
+  }
+}
+
+/// The mark in the middle of the map while a point is being chosen.
+class _Crosshair extends StatelessWidget {
+  const _Crosshair();
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    // A light halo under a dark mark (or the reverse) shows on any map.
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        Container(
+          width: 52,
+          height: 52,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: colors.surface.withValues(alpha: 0.55),
+            border: Border.all(color: colors.primary, width: 2),
+          ),
+        ),
+        Icon(Icons.add, size: 40, color: colors.onSurface),
+      ],
+    );
+  }
+}
+
+/// A compact glass button with an icon and a word: quick actions on the map.
+class _GlassButton extends StatelessWidget {
+  const _GlassButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.accent = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  /// Filled with the accent colour: the one thing to press right now.
+  final bool accent;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final fg = accent ? colors.onPrimary : colors.onSurface;
+    return Glass(
+      color: accent ? colors.primary : null,
+      opacity: accent ? 0.95 : 0.86,
+      child: InkWell(
+        onTap: onTap,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: Ui.button),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Ui.pad),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 24, color: accent ? fg : colors.primary),
+                const SizedBox(width: 10),
+                Text(
+                  label,
+                  style: theme.textTheme.titleSmall?.copyWith(color: fg),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
   }
 }
 
-/// Zoom and position buttons on the right edge: few, and large enough to
-/// hit while driving.
-class _MapButtons extends StatelessWidget {
-  const _MapButtons({
-    required this.onMyPosition,
+/// The buttons on the right edge: zoom, 3D and the position, few and large
+/// enough to hit while driving; above them the compass, which appears only
+/// while the map is turned or tilted.
+class MapButtons extends StatelessWidget {
+  const MapButtons({
+    super.key,
+    required this.camera,
+    required this.onZoom,
+    required this.onToggle3d,
+    required this.onNorthUp,
+    required this.onLocation,
     required this.onLocationDetails,
     required this.hasFix,
-    required this.onZoom,
+    required this.mode,
+    required this.tilted,
+    this.privateArea = false,
   });
 
-  final VoidCallback onMyPosition, onLocationDetails;
-  final bool hasFix;
+  final MapViewController camera;
   final void Function(double delta) onZoom;
+  final VoidCallback onToggle3d, onNorthUp, onLocation, onLocationDetails;
+  final bool hasFix;
+  final LocationMode mode;
+
+  /// Whether the 3D view is on (the button looks pressed).
+  final bool tilted;
+
+  /// Inside a privacy zone: a small shield on the location button says
+  /// that collecting is paused.
+  final bool privateArea;
 
   @override
   Widget build(BuildContext context) {
-    Widget button(String tooltip, IconData icon, VoidCallback onPressed) =>
-        IconButton(
-          tooltip: tooltip,
-          iconSize: 28,
-          constraints: const BoxConstraints.tightFor(width: 56, height: 56),
-          icon: Icon(icon),
-          onPressed: onPressed,
-        );
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          button('Приблизить', Icons.add, () => onZoom(1)),
-          button('Отдалить', Icons.remove, () => onZoom(-1)),
-          const SizedBox(width: 32, child: Divider(height: 8)),
-          GestureDetector(
-            onLongPress: onLocationDetails,
-            child: button(
-              hasFix ? 'Моё местоположение' : 'Местоположение не определено',
-              hasFix ? Icons.my_location : Icons.location_searching,
-              onMyPosition,
-            ),
+    final colors = Theme.of(context).colorScheme;
+    Widget button(
+      String label,
+      Widget icon,
+      VoidCallback onPressed, {
+      bool active = false,
+    }) => IconButton(
+      tooltip: label,
+      iconSize: 28,
+      color: active ? colors.primary : colors.onSurface,
+      style: active
+          ? IconButton.styleFrom(
+              backgroundColor: colors.primary.withValues(alpha: 0.14),
+            )
+          : null,
+      constraints: const BoxConstraints.tightFor(width: 56, height: 56),
+      icon: icon,
+      onPressed: onPressed,
+    );
+
+    final locationIcon = !hasFix
+        ? Icons.location_searching
+        : mode == LocationMode.heading
+        ? Icons.navigation
+        : Icons.my_location;
+    final locationLabel = !hasFix
+        ? 'Местоположение не определено'
+        : switch (mode) {
+            LocationMode.free => 'Показать моё местоположение',
+            LocationMode.centered => 'Поворачивать карту по ходу движения',
+            LocationMode.heading => 'Карта следует за мной',
+          };
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // The compass keeps its place while hidden, so the column below
+        // does not jump when it appears.
+        ListenableBuilder(
+          listenable: camera.cameraChanges,
+          builder: (context, _) {
+            final bearing = camera.ready ? camera.bearing : 0.0;
+            final pitch = camera.ready ? camera.pitch : 0.0;
+            final turned = angleDelta(0, bearing).abs() > 0.5;
+            final shown = turned || pitch > 1;
+            // Not built while hidden: a glass surface is blurred by the
+            // map engine wherever it is, visible or not.
+            return Padding(
+              padding: const EdgeInsets.only(bottom: Ui.gap),
+              child: SizedBox(
+                width: 56,
+                height: 56,
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 180),
+                  child: !shown
+                      ? const SizedBox.shrink()
+                      : Glass(
+                          radius: 28,
+                          child: button(
+                            'Повернуть севером вверх',
+                            Transform.rotate(
+                              angle: -bearing * math.pi / 180,
+                              child: Icon(
+                                Icons.navigation,
+                                color: turned ? colors.primary : colors.outline,
+                              ),
+                            ),
+                            onNorthUp,
+                          ),
+                        ),
+                ),
+              ),
+            );
+          },
+        ),
+        Glass(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              button('Приблизить', const Icon(Icons.add), () => onZoom(1)),
+              button('Отдалить', const Icon(Icons.remove), () => onZoom(-1)),
+              if (camera.maxPitch > 0)
+                button(
+                  tilted ? 'Плоская карта' : 'Объёмная карта',
+                  const Text(
+                    '3D',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                  ),
+                  onToggle3d,
+                  active: tilted,
+                ),
+              const SizedBox(width: 32, child: Divider(height: 8)),
+              GestureDetector(
+                onLongPress: onLocationDetails,
+                child: Stack(
+                  children: [
+                    button(
+                      locationLabel,
+                      Icon(locationIcon),
+                      onLocation,
+                      active: hasFix && mode != LocationMode.free,
+                    ),
+                    if (privateArea)
+                      Positioned(
+                        right: 6,
+                        top: 6,
+                        child: IgnorePointer(
+                          child: Icon(
+                            Icons.shield,
+                            size: 16,
+                            color: colors.primary,
+                            semanticLabel:
+                                'Безопасная зона: сбор приостановлен',
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
+        ),
+        // Balances the compass above, keeping the column centred.
+        const SizedBox(height: 56 + Ui.gap),
+      ],
     );
   }
 }
 
-class _TrafficSwitch extends StatelessWidget {
-  const _TrafficSwitch({required this.controller, required this.vertical});
+/// Traffic source on the map: one glass chip with the choice and its state.
+class TrafficChip extends StatelessWidget {
+  const TrafficChip({super.key, required this.controller});
 
   final TrafficController controller;
-  final bool vertical;
 
   static const _labels = {
     TrafficSource.off: 'Без пробок',
@@ -744,86 +1699,63 @@ class _TrafficSwitch extends StatelessWidget {
     if (controller.error != null) return 'Пробки не загрузились';
     final at = controller.updatedAt;
     if (at == null) return 'Загрузка…';
-    final hh = at.hour.toString().padLeft(2, '0');
-    final mm = at.minute.toString().padLeft(2, '0');
-    return 'Обновлено в $hh:$mm';
+    return 'Обновлено в ${formatClock(at)}';
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final colors = theme.colorScheme;
     final status = _status();
-    final statusText = status == null
-        ? null
-        : Text(
-            status,
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: controller.error != null
-                  ? theme.colorScheme.error
-                  : theme.colorScheme.onSurfaceVariant,
+    final on = controller.source != TrafficSource.off;
+    return Glass(
+      child: PopupMenuButton<TrafficSource>(
+        tooltip: 'Пробки',
+        initialValue: controller.source,
+        onSelected: controller.select,
+        itemBuilder: (context) => [
+          for (final s in TrafficSource.values)
+            PopupMenuItem(
+              value: s,
+              height: Ui.button,
+              child: Text(_labels[s]!),
             ),
-          );
-
-    // Short screens get a single button with a menu instead of a wide switch.
-    if (vertical) {
-      return Card(
-        clipBehavior: Clip.antiAlias,
-        child: PopupMenuButton<TrafficSource>(
-          tooltip: 'Пробки',
-          initialValue: controller.source,
-          onSelected: controller.select,
-          itemBuilder: (context) => [
-            for (final s in TrafficSource.values)
-              PopupMenuItem(value: s, child: Text(_labels[s]!)),
-          ],
+        ],
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: Ui.button),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: Ui.pad),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.traffic_outlined, size: 20),
-                const SizedBox(width: 8),
+                Icon(
+                  Icons.traffic_outlined,
+                  size: 24,
+                  color: on ? colors.primary : colors.onSurfaceVariant,
+                ),
+                const SizedBox(width: 10),
                 Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       _labels[controller.source]!,
-                      style: theme.textTheme.labelLarge,
+                      style: theme.textTheme.titleSmall,
                     ),
-                    ?statusText,
+                    if (status != null)
+                      Text(
+                        status,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: controller.error != null
+                              ? colors.error
+                              : colors.onSurfaceVariant,
+                        ),
+                      ),
                   ],
                 ),
               ],
             ),
           ),
-        ),
-      );
-    }
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(6),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SegmentedButton<TrafficSource>(
-              showSelectedIcon: false,
-              style: const ButtonStyle(visualDensity: VisualDensity.compact),
-              segments: [
-                for (final s in TrafficSource.values)
-                  ButtonSegment(value: s, label: Text(_labels[s]!)),
-              ],
-              selected: {controller.source},
-              onSelectionChanged: (s) => controller.select(s.first),
-            ),
-            if (statusText != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(6, 4, 6, 0),
-                child: statusText,
-              ),
-          ],
         ),
       ),
     );

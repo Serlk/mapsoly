@@ -16,6 +16,7 @@ export 'online/beacondb.dart';
 export 'online/resolver.dart';
 export 'signal_model.dart';
 export 'sources/linux_cell.dart';
+export 'sources/linux_compass.dart';
 export 'sources/linux_wifi.dart';
 export 'sources/nmea_socket_gnss.dart';
 export 'sources/sources.dart';

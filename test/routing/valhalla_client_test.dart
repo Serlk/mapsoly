@@ -236,6 +236,35 @@ void main() {
       expect(RouteCosting.pedestrian.name, 'pedestrian');
     });
 
+    test('with stopAtVias every location is a stop of its own', () {
+      final body = ValhallaClient.buildRouteRequest(
+        locations: const [LatLng(1, 2), LatLng(3, 4), LatLng(5, 6)],
+        stopAtVias: true,
+      );
+      expect((body['locations'] as List).map((l) => l['type']), [
+        'break',
+        'break',
+        'break',
+      ]);
+    });
+
+    test('a route through a stop has a leg with its own totals per stop', () {
+      final route = RouteResult.fromJson(
+        fixtureJson('route_pedestrian_two_legs.json'),
+      ).best;
+      expect(route.legs.length, 2);
+      expect(route.legs.map((l) => l.summary.lengthMeters.round()), [
+        837,
+        1146,
+      ]);
+      expect(
+        route.legs.fold(0.0, (s, l) => s + l.summary.timeSeconds),
+        closeTo(route.timeSeconds, 0.01),
+      );
+      // The second leg starts where the first ended, in the joined shape.
+      expect(route.shape[route.legs[1].shapeOffset], route.legs[0].shape.last);
+    });
+
     test('keeps a base path prefix', () async {
       late Uri seen;
       final client = ValhallaClient(

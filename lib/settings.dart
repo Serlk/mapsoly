@@ -40,6 +40,28 @@ class AppSettings extends ChangeNotifier {
   String? _catalogUrl;
   ObdConfig _obd = const ObdConfig();
   double? _zoom;
+  bool _drive3d = true;
+  bool _tilted = false;
+
+  /// Whether the camera tilts and turns along the route during guidance
+  /// (on engines that can tilt). Off: the map stays flat and north-up.
+  bool get drive3d => _drive3d;
+
+  set drive3d(bool value) {
+    if (value == _drive3d) return;
+    _drive3d = value;
+    _changed();
+  }
+
+  /// Whether the map was left tilted (3D) outside guidance.
+  bool get tilted => _tilted;
+
+  /// Saved without notifying listeners: the map itself is the source.
+  set tilted(bool value) {
+    if (value == _tilted) return;
+    _tilted = value;
+    _write();
+  }
 
   ThemeMode get themeMode => _themeMode;
   TrafficSource get traffic => _traffic;
@@ -122,6 +144,8 @@ class AppSettings extends ChangeNotifier {
         settings._traffic = _byName(TrafficSource.values, json['traffic']);
         settings._onlineLocation = json['onlineLocation'] == true;
         settings._wardriving = json['wardriving'] == true;
+        settings._drive3d = json['drive3d'] != false;
+        settings._tilted = json['tilted'] == true;
         final obd = json['obd'];
         if (obd is Map<String, dynamic>) {
           settings._obd = ObdConfig.fromJson(obd);
@@ -162,6 +186,8 @@ class AppSettings extends ChangeNotifier {
             'traffic': _traffic.name,
             'onlineLocation': _onlineLocation,
             'wardriving': _wardriving,
+            'drive3d': _drive3d,
+            'tilted': _tilted,
             if (_catalogUrl != null) 'catalogUrl': _catalogUrl,
             'obd': _obd.toJson(),
             if (_center != null) ...{

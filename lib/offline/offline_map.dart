@@ -26,6 +26,41 @@ class OfflineMap {
   /// The pack folder this map belongs to.
   Directory get packDirectory => File(path).parent;
 
+  /// Opens the map of every installed pack (by folder name), or only the
+  /// archive named by MAPSOLY_MAP. A pack whose map cannot be opened is
+  /// left out. Empty when there is no offline map yet.
+  static Future<List<OfflineMap>> loadAll() async {
+    if (Platform.environment['MAPSOLY_MAP'] != null) {
+      final one = await load();
+      return [?one];
+    }
+    final dir = await packsDirectory();
+    if (!dir.existsSync()) return const [];
+    final files =
+        dir
+            .listSync()
+            .whereType<Directory>()
+            .map((d) => '${d.path}/map.pmtiles')
+            .where((p) => File(p).existsSync())
+            .toList()
+          ..sort();
+    if (files.isEmpty) return const [];
+    Future<vtr.Theme> style(String name) async => vtr.ThemeReader().read(
+      jsonDecode(await rootBundle.loadString('assets/styles/$name.json'))
+          as Map<String, dynamic>,
+    );
+    final bright = await style('bright'), dark = await style('dark');
+    final maps = <OfflineMap>[];
+    for (final path in files) {
+      try {
+        maps.add(OfflineMap._(PmTilesArchive.open(path), bright, dark, path));
+      } on Exception {
+        continue; // a damaged pack must not hide the others
+      }
+    }
+    return maps;
+  }
+
   /// Opens the archive named by MAPSOLY_MAP, or the first installed pack.
   /// Returns null when there is no offline map yet.
   static Future<OfflineMap?> load() async {

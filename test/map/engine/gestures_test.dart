@@ -19,7 +19,7 @@ class _Host {
       animatedFlags.add(animated);
     },
     onLongPress: longPresses.add,
-    viewSize: () => size,
+    origin: () => size.center(Offset.zero),
     onAnimating: animating.add,
   );
 
@@ -103,6 +103,37 @@ void main() {
     // The content turns with the fingers (clockwise), so the bearing drops.
     expect(h.camera.bearing, closeTo(-25, 0.01));
     expect(h.camera.zoom, closeTo(14, 0.01));
+  });
+
+  test('two fingers moving up together tilt the view', () {
+    final h = _Host();
+    h.gestures.pointerDown(1, const Offset(260, 400), 0);
+    h.gestures.pointerDown(2, const Offset(460, 405), 0.01);
+    h.gestures.pointerMove(1, const Offset(261, 380), 0.05);
+    h.gestures.pointerMove(2, const Offset(459, 384), 0.05);
+    final centre = h.camera.center;
+    h.gestures.pointerMove(1, const Offset(261, 300), 0.2);
+    h.gestures.pointerMove(2, const Offset(459, 304), 0.2);
+    // About 90 px of travel once the tilt was recognised.
+    expect(h.camera.pitch, closeTo(90 * MapGestures.pitchPerPixel, 5));
+    expect(h.camera.zoom, 14);
+    expect(h.camera.bearing, 0);
+    expect(h.camera.center, centre);
+    // Back down, and further than where it started: clamped at flat.
+    h.gestures.pointerMove(1, const Offset(261, 600), 0.4);
+    h.gestures.pointerMove(2, const Offset(459, 604), 0.4);
+    expect(h.camera.pitch, 0);
+  });
+
+  test('a pinch with some vertical movement is not a tilt', () {
+    final h = _Host();
+    h.gestures.pointerDown(1, const Offset(300, 300), 0);
+    h.gestures.pointerDown(2, const Offset(420, 300), 0.01);
+    // Fingers move apart diagonally: one up, one down.
+    h.gestures.pointerMove(1, const Offset(260, 260), 0.1);
+    h.gestures.pointerMove(2, const Offset(460, 340), 0.1);
+    expect(h.camera.pitch, 0);
+    expect(h.camera.zoom, greaterThan(14.3));
   });
 
   // testWidgets runs on a fake clock, which the long-press timer needs.
