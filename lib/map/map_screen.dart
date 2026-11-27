@@ -654,15 +654,16 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     // Called while the route notifies; the screen is rebuilt right after.
   }
 
-  /// Puts the car in the lower third of what the banner leaves free. The
-  /// bottom bar is already kept clear by the engine.
+  /// Puts the car in the lower third of what is free between the speed
+  /// badge at the top and the maneuver banner at the bottom.
   void _applyDrivePadding() {
     if (!_driving || _viewSize.isEmpty) return;
     final banner = _bannerKey.currentContext?.findRenderObject();
-    final top = banner is RenderBox && banner.hasSize
+    final cover = banner is RenderBox && banner.hasSize
         ? banner.size.height + 16
         : 150.0;
-    _map.setPadding(drivePadding(_viewSize, top: top, bottom: 64));
+    final padding = drivePadding(_viewSize, top: 16, bottom: 64 + cover);
+    _map.setPadding(padding.copyWith(bottom: cover));
   }
 
   /// What the map should show right now.
@@ -1075,12 +1076,14 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
             alignment: Alignment.centerRight,
             child: Padding(
               padding: EdgeInsets.only(
-                top:
-                    (narrow && showsBanner ? 170 : 0) +
-                    (narrow && speedometer != null
-                        ? Speedometer.size + Ui.gap
-                        : 0),
-                bottom: narrow && showsCard ? 270 : 0,
+                top: narrow && speedometer != null
+                    ? Speedometer.size + Ui.gap
+                    : 0,
+                bottom: narrow && showsCard
+                    ? 270
+                    : narrow && showsBanner
+                    ? 190
+                    : 0,
               ),
               child: MapButtons(
                 camera: _map,
@@ -1245,24 +1248,6 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
             ],
           ),
         ),
-      if (guiding && arrival == null)
-        Align(
-          alignment: Alignment.topLeft,
-          child: Padding(
-            padding: EdgeInsets.only(right: side),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 520),
-              child: GuidanceBanner(
-                key: _bannerKey,
-                controller: _route,
-                confirmingEnd: _confirmEnd,
-                onAskEnd: _askEnd,
-                onCancelEnd: _cancelEnd,
-                onEnd: _endGuidance,
-              ),
-            ),
-          ),
-        ),
       if (card != null)
         Align(
           alignment: Alignment.bottomLeft,
@@ -1275,25 +1260,49 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
           ),
         )
       else if (guiding)
+        // The maneuver sits at the bottom left, next to the thumb and out
+        // of the way of the road ahead; what belongs to the trip stacks
+        // above it.
         Align(
           alignment: Alignment.bottomLeft,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              if (_obd != null)
-                Padding(
-                  padding: const EdgeInsets.only(right: Ui.gap),
-                  child: VehicleChip(service: _obd!),
+          child: Padding(
+            padding: EdgeInsets.only(right: side),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    if (_obd != null)
+                      Padding(
+                        padding: const EdgeInsets.only(right: Ui.gap),
+                        child: VehicleChip(service: _obd!),
+                      ),
+                    if (_driving && _follow.paused)
+                      _GlassButton(
+                        icon: Icons.navigation,
+                        label: 'Вернуться к маршруту',
+                        accent: true,
+                        onTap: _resumeFollowing,
+                      ),
+                  ],
                 ),
-              if (_driving && _follow.paused)
-                _GlassButton(
-                  icon: Icons.navigation,
-                  label: 'Вернуться к маршруту',
-                  accent: true,
-                  onTap: _resumeFollowing,
+                const SizedBox(height: Ui.gap),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 520),
+                  child: GuidanceBanner(
+                    key: _bannerKey,
+                    controller: _route,
+                    confirmingEnd: _confirmEnd,
+                    onAskEnd: _askEnd,
+                    onCancelEnd: _cancelEnd,
+                    onEnd: _endGuidance,
+                  ),
                 ),
-            ],
+              ],
+            ),
           ),
         )
       else if (quick.isNotEmpty)
@@ -1317,15 +1326,11 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
             ],
           ),
         ),
-      // The speed sits in the top right corner, where drivers look for it;
-      // on a narrow phone the banner takes the full width, so under it.
+      // The speed sits in the top right corner, where drivers look for it.
       if (speedometer != null)
         Align(
           alignment: Alignment.topRight,
-          child: Padding(
-            padding: EdgeInsets.only(top: narrow && showsBanner ? 170 : 0),
-            child: speedometer,
-          ),
+          child: Padding(padding: EdgeInsets.zero, child: speedometer),
         ),
       buttonsSlot,
     ];

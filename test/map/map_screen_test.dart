@@ -476,10 +476,16 @@ void main() {
     await tester.pumpAndSettle();
     await shot(tester, 'map_driving');
     // Behind the car: tilted, turned along the route, car in the lower
-    // third (the camera keeps the top of the view free).
+    // third of what the banner at the bottom leaves free.
     expect(map.pitch, tiltedPitch);
     expect(map.center.latitude, closeTo(r.shape[31].latitude, 1e-3));
-    expect(map.padding.top, greaterThan(200));
+    expect(map.padding.top, greaterThan(100));
+    // The maneuver banner at the bottom does not cover the car.
+    expect(map.padding.bottom, greaterThan(100));
+    expect(
+      tester.getBottomLeft(find.byType(GuidanceBanner)).dy,
+      greaterThan(500),
+    );
     expect(scene!.buildings3d, isTrue);
     expect(find.text('Вернуться к маршруту'), findsNothing);
 
