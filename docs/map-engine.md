@@ -286,8 +286,18 @@ makes the view fall back to the Flutter engine.
 - The map is one frame behind the widgets drawn over it in the worst case (it is drawn
   after a vsync and composited by Flutter at the next one), and every map frame costs a
   Flutter frame with its blurs on top. Whether that matters on a slow phone is not known.
-- The texture is the full resolution of the screen. Rendering at a lower pixel ratio and
-  letting Flutter scale it would be the first thing to try on a weak GPU; not done.
+- The texture has a pixel budget (`mapPixelRatio`, about 2.2 million pixels): a view that
+  would need more is drawn at a lower pixel ratio, never below 1.25, and scaled up by
+  Flutter; lines and labels keep their size. A 2560x1600 tablet at density 2 draws
+  1600x1000. "Map at full resolution" in the settings lifts the budget.
+- Frames are paced in whole vsyncs (`Backend::pace` in `native/maplibre/android/backend.hpp`):
+  after each frame the map thread waits on an EGL fence for the GPU to finish it, and
+  when frames stop fitting into one vsync the map draws every second (third, fourth) one
+  instead of a random mix; it goes back after two seconds of frames fitting with room to
+  spare. The frame rate cap is a vsync count there too.
+- All glass panels share one backdrop blur (`BackdropGroup` in the map screen).
+- The three points above were checked on the emulator only (software GPU): the budget and
+  the pacing work as written; what they gain on a real GPU is unmeasured.
 - armeabi-v7a is not built by default (the script accepts it; never tried).
 - **Tested on the emulator only** (x86_64, API 34). The arm64 library is built and
   packaged but has never run; frame rates on a phone are unmeasured. See
