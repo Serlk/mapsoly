@@ -10,6 +10,7 @@
 #include <gdk/gdk.h>
 #ifdef GDK_WINDOWING_WAYLAND
 #include <gdk/gdkwayland.h>
+#include <wayland-client.h>
 #endif
 
 gboolean native_view_wanted(GtkWindow* window) {
@@ -62,25 +63,91 @@ static FlMethodResponse* handles(FlView* view) {
 }
 
 // Keeps the screen on while the driver follows the map: an idle inhibitor on
-// the window, which on Wayland GTK turns into zwp_idle_inhibitor_v1.
-static guint keep_awake_cookie = 0;
+// the window's surface (idle-inhibit-unstable-v1). The protocol is two tiny
+// interfaces, described here by hand so that the build needs no scanner. GTK's own
+// gtk_application_inhibit() was tried first and returned nothing on the phone.
+#ifdef GDK_WINDOWING_WAYLAND
+static const wl_interface* kNoTypes[] = {nullptr};
+static const wl_message kInhibitorRequests[] = {{"destroy", "", kNoTypes}};
+static const wl_interface kInhibitorInterface = {
+    "zwp_idle_inhibitor_v1", 1, 1, kInhibitorRequests, 0, nullptr};
+static const wl_interface* kCreateTypes[] = {&kInhibitorInterface,
+                                                   &wl_surface_interface};
+static const wl_message kManagerRequests[] = {
+    {"destroy", "", kNoTypes}, {"create_inhibitor", "no", kCreateTypes}};
+static const wl_interface kManagerInterface = {
+    "zwp_idle_inhibit_manager_v1", 1, 2, kManagerRequests, 0, nullptr};
 
-static void keep_awake(FlView* view, gboolean on) {
+static wl_proxy* idle_manager = nullptr;
+static wl_proxy* idle_inhibitor = nullptr;
+static gboolean idle_manager_looked_up = FALSE;
+
+static void registry_global(void* data, wl_registry* registry, uint32_t name,
+                            const char* interface, uint32_t version) {
+  if (g_strcmp0(interface, kManagerInterface.name) == 0 &&
+      idle_manager == nullptr) {
+    idle_manager = static_cast<wl_proxy*>(
+        wl_registry_bind(registry, name, &kManagerInterface, 1));
+  }
+}
+
+static void registry_global_remove(void*, wl_registry*, uint32_t) {}
+
+static const wl_registry_listener kRegistryListener = {registry_global,
+                                                       registry_global_remove};
+
+// Finds the compositor's inhibit manager on a queue of its own, so that GTK's
+// event handling is not disturbed.
+static void find_idle_manager(wl_display* display) {
+  if (idle_manager_looked_up) {
+    return;
+  }
+  idle_manager_looked_up = TRUE;
+  wl_event_queue* queue = wl_display_create_queue(display);
+  wl_display* wrapper =
+      static_cast<wl_display*>(wl_proxy_create_wrapper(display));
+  wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(wrapper), queue);
+  wl_registry* registry = wl_display_get_registry(wrapper);
+  wl_proxy_wrapper_destroy(wrapper);
+  wl_registry_add_listener(registry, &kRegistryListener, nullptr);
+  wl_display_roundtrip_queue(display, queue);
+  if (idle_manager != nullptr) {
+    // The manager sends no events; move it off the queue about to go away.
+    wl_proxy_set_queue(idle_manager, nullptr);
+  }
+  wl_registry_destroy(registry);
+  wl_event_queue_destroy(queue);
+}
+#endif
+
+static gboolean keep_awake(FlView* view, gboolean on) {
+#ifdef GDK_WINDOWING_WAYLAND
   GtkWidget* toplevel = gtk_widget_get_toplevel(GTK_WIDGET(view));
-  if (!GTK_IS_WINDOW(toplevel)) {
-    return;
+  GdkWindow* window = gtk_widget_get_window(toplevel);
+  GdkDisplay* gdk_display = gtk_widget_get_display(GTK_WIDGET(view));
+  if (window == nullptr || !GDK_IS_WAYLAND_DISPLAY(gdk_display)) {
+    return FALSE;
   }
-  GtkApplication* app = gtk_window_get_application(GTK_WINDOW(toplevel));
-  if (app == nullptr) {
-    return;
+  wl_display* display = gdk_wayland_display_get_wl_display(gdk_display);
+  if (on && idle_inhibitor == nullptr) {
+    find_idle_manager(display);
+    wl_surface* surface = gdk_wayland_window_get_wl_surface(window);
+    if (idle_manager != nullptr && surface != nullptr) {
+      idle_inhibitor = wl_proxy_marshal_flags(
+          idle_manager, 1 /* create_inhibitor */, &kInhibitorInterface,
+          wl_proxy_get_version(idle_manager), 0, nullptr, surface);
+    }
+  } else if (!on && idle_inhibitor != nullptr) {
+    wl_proxy_marshal_flags(idle_inhibitor, 0 /* destroy */, nullptr,
+                           wl_proxy_get_version(idle_inhibitor),
+                           WL_MARSHAL_FLAG_DESTROY);
+    idle_inhibitor = nullptr;
   }
-  if (on && keep_awake_cookie == 0) {
-    keep_awake_cookie = gtk_application_inhibit(
-        app, GTK_WINDOW(toplevel), GTK_APPLICATION_INHIBIT_IDLE, "Navigation");
-  } else if (!on && keep_awake_cookie != 0) {
-    gtk_application_uninhibit(app, keep_awake_cookie);
-    keep_awake_cookie = 0;
-  }
+  wl_display_flush(display);
+  return idle_inhibitor != nullptr;
+#else
+  return FALSE;
+#endif
 }
 
 static void method_call_cb(FlMethodChannel* channel,
@@ -97,11 +164,11 @@ static void method_call_cb(FlMethodChannel* channel,
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
   } else if (g_strcmp0(method, "keepAwake") == 0) {
     FlValue* args = fl_method_call_get_args(call);
-    keep_awake(view, args != nullptr &&
-                         fl_value_get_type(args) == FL_VALUE_TYPE_BOOL &&
-                         fl_value_get_bool(args));
+    gboolean held = keep_awake(
+        view, args != nullptr && fl_value_get_type(args) == FL_VALUE_TYPE_BOOL &&
+                  fl_value_get_bool(args));
     response = FL_METHOD_RESPONSE(
-        fl_method_success_response_new(fl_value_new_bool(keep_awake_cookie != 0)));
+        fl_method_success_response_new(fl_value_new_bool(held)));
   } else {
     response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
   }

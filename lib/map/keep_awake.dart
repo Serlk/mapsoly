@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 
 /// Keeps the display from turning off, for a phone on the dashboard.
 ///
-/// On Linux the runner holds an idle inhibitor (see
+/// On Linux the runner holds a Wayland idle inhibitor (see
 /// linux/runner/native_view_plugin.cc); where there is nothing to ask, the
 /// request is quietly dropped.
 class KeepAwake {
