@@ -5,7 +5,27 @@ import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'obd/obd_service.dart';
 import 'traffic/traffic.dart';
+
+/// Map server used unless the user enters another one in the settings.
+const defaultCatalogUrl = 'https://mp.srlk-dd.ru/catalog.json';
+
+/// Turns what a user typed into a catalog address, or returns null when it
+/// cannot be one. A bare host gets `https://` and `/catalog.json`.
+String? normalizeCatalogUrl(String input) {
+  var text = input.trim();
+  if (text.isEmpty) return null;
+  if (!text.contains('://')) text = 'https://$text';
+  final uri = Uri.tryParse(text);
+  if (uri == null ||
+      uri.host.isEmpty ||
+      (uri.scheme != 'https' && uri.scheme != 'http')) {
+    return null;
+  }
+  final path = uri.path.isEmpty || uri.path == '/' ? '/catalog.json' : uri.path;
+  return uri.replace(path: path).toString();
+}
 
 /// User choices that survive restarts, kept in a small JSON file.
 class AppSettings extends ChangeNotifier {
@@ -17,6 +37,8 @@ class AppSettings extends ChangeNotifier {
   LatLng? _center;
   bool _onlineLocation = false;
   bool _wardriving = false;
+  String? _catalogUrl;
+  ObdConfig _obd = const ObdConfig();
   double? _zoom;
 
   ThemeMode get themeMode => _themeMode;
@@ -38,6 +60,30 @@ class AppSettings extends ChangeNotifier {
   set wardriving(bool value) {
     if (value == _wardriving) return;
     _wardriving = value;
+    _changed();
+  }
+
+  /// Where the list of downloadable region packs is fetched from: the
+  /// user's own server if one was entered, otherwise [defaultCatalogUrl].
+  String get catalogUrl => _catalogUrl ?? defaultCatalogUrl;
+
+  /// True when the address was changed from the default.
+  bool get hasCustomCatalog => _catalogUrl != null;
+
+  /// Sets the catalog address; null or the default address resets it.
+  set catalogUrl(String? value) {
+    final v = value == null || value == defaultCatalogUrl ? null : value;
+    if (v == _catalogUrl) return;
+    _catalogUrl = v;
+    _changed();
+  }
+
+  /// ELM327 adapter and what to read from the car.
+  ObdConfig get obd => _obd;
+
+  set obd(ObdConfig value) {
+    if (value == _obd) return;
+    _obd = value;
     _changed();
   }
 
@@ -76,6 +122,14 @@ class AppSettings extends ChangeNotifier {
         settings._traffic = _byName(TrafficSource.values, json['traffic']);
         settings._onlineLocation = json['onlineLocation'] == true;
         settings._wardriving = json['wardriving'] == true;
+        final obd = json['obd'];
+        if (obd is Map<String, dynamic>) {
+          settings._obd = ObdConfig.fromJson(obd);
+        }
+        final catalog = json['catalogUrl'];
+        if (catalog is String && catalog.isNotEmpty) {
+          settings._catalogUrl = catalog;
+        }
         final lat = json['lat'], lon = json['lon'], zoom = json['zoom'];
         if (lat is num && lon is num && zoom is num) {
           settings._center = LatLng(lat.toDouble(), lon.toDouble());
@@ -108,6 +162,8 @@ class AppSettings extends ChangeNotifier {
             'traffic': _traffic.name,
             'onlineLocation': _onlineLocation,
             'wardriving': _wardriving,
+            if (_catalogUrl != null) 'catalogUrl': _catalogUrl,
+            'obd': _obd.toJson(),
             if (_center != null) ...{
               'lat': _center!.latitude,
               'lon': _center!.longitude,

@@ -117,6 +117,12 @@ class PrivacyGuard {
     }
   }
 
+  /// [p] if it may leave the device (as the "search near here" hint of an
+  /// online search, say), null if its circle of [accuracyM] metres touches
+  /// a zone.
+  LatLng? shareable(LatLng? p, {double accuracyM = 0}) =>
+      p == null || zones.intersects(p, accuracyM) ? null : p;
+
   /// Wraps a position source for the trip log: inside a zone the result is
   /// null, so the row is written with empty coordinates and the vehicle
   /// data is kept. [accuracyM], when given, is the uncertainty of the

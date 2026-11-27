@@ -6,10 +6,6 @@ import 'package:flutter/material.dart';
 import 'catalog.dart';
 import 'pack_store.dart';
 
-/// Where the list of downloadable regions comes from unless overridden by
-/// the MAPSOLY_CATALOG environment variable.
-const defaultCatalogUrl = 'https://mp.srlk-dd.ru/catalog.json';
-
 String formatBytes(int bytes) {
   if (bytes >= 1 << 30) {
     return '${(bytes / (1 << 30)).toStringAsFixed(1).replaceAll('.', ',')} ГБ';
@@ -20,9 +16,18 @@ String formatBytes(int bytes) {
 
 /// "Maps" screen: regions available for download and those on the device.
 class PacksScreen extends StatefulWidget {
-  const PacksScreen({super.key, required this.store, required this.onChanged});
+  const PacksScreen({
+    super.key,
+    required this.store,
+    required this.catalogUrl,
+    required this.onChanged,
+  });
 
   final PackStore store;
+
+  /// Address of the catalog (the MAPSOLY_CATALOG environment variable
+  /// overrides it for testing).
+  final String catalogUrl;
 
   /// Called after a pack was installed or deleted, so the map can reload.
   final VoidCallback onChanged;
@@ -65,7 +70,7 @@ class _PacksScreenState extends State<PacksScreen> {
     });
     try {
       final url = Uri.parse(
-        Platform.environment['MAPSOLY_CATALOG'] ?? defaultCatalogUrl,
+        Platform.environment['MAPSOLY_CATALOG'] ?? widget.catalogUrl,
       );
       final catalog = await widget.store.fetchCatalog(url);
       if (mounted) setState(() => _catalog = catalog);

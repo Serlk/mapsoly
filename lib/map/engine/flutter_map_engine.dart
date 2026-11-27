@@ -80,7 +80,9 @@ class FlutterMapView extends StatelessWidget {
   /// Offline vector map when a region pack is installed, otherwise online
   /// raster tiles.
   Widget _baseLayer(BuildContext context) {
-    final offline = scene.offline;
+    // One archive at a time here; several packs are drawn together only by
+    // the MapLibre engine.
+    final offline = scene.packs.firstOrNull;
     if (offline == null) {
       final tiles = TileLayer(
         urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',

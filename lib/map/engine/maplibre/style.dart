@@ -157,18 +157,35 @@ void _addOverlays(Map<String, dynamic> style, OverlayColors colors) {
 String buildVectorStyle({
   required String bundledStyleJson,
   required String name,
-  required String pmtilesPath,
+  String? pmtilesPath,
+  VectorTiles? tiles,
   required String assetsDir,
   required OverlayColors colors,
 }) {
+  assert((pmtilesPath == null) != (tiles == null));
   final style = jsonDecode(bundledStyleJson) as Map<String, dynamic>;
   style['sources'] = <String, dynamic>{
-    'openmaptiles': {'type': 'vector', 'url': 'pmtiles://file://$pmtilesPath'},
+    'openmaptiles': tiles == null
+        ? {'type': 'vector', 'url': 'pmtiles://file://$pmtilesPath'}
+        : {
+            'type': 'vector',
+            'tiles': [tiles.urlTemplate],
+            'minzoom': tiles.minZoom,
+            'maxzoom': tiles.maxZoom,
+          },
   };
   style['glyphs'] = 'file://$assetsDir/fonts/{fontstack}/{range}.pbf';
   style['sprite'] = 'file://$assetsDir/sprites/$name/sprite';
   _addOverlays(style, colors);
   return jsonEncode(style);
+}
+
+/// Vector tiles fetched by URL template instead of read from one archive:
+/// several packs served as one tile set by the app's tile server.
+class VectorTiles {
+  const VectorTiles(this.urlTemplate, this.minZoom, this.maxZoom);
+  final String urlTemplate;
+  final int minZoom, maxZoom;
 }
 
 /// Online raster tiles (served through the app's tile server at [tilesUrl])

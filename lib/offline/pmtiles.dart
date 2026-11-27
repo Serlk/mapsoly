@@ -50,8 +50,18 @@ class PmTilesArchive {
     }
   }
 
+  /// Whether [storedTile] returns gzip data (else: plain).
+  bool get tilesGzipped => _header.getUint8(98) == _compressionGzip;
+
   /// Returns the decompressed tile, or null if the archive has no such tile.
   Uint8List? tile(int z, int x, int y) {
+    final data = storedTile(z, x, y);
+    return data == null ? null : _decompress(data, _header.getUint8(98));
+  }
+
+  /// Returns the tile exactly as stored (compressed if the archive is, see
+  /// [tilesGzipped]), or null if the archive has no such tile.
+  Uint8List? storedTile(int z, int x, int y) {
     if (z < minZoom || z > maxZoom) return null;
     final id = tileId(z, x, y);
     var dir = _root;
@@ -61,12 +71,11 @@ class PmTilesArchive {
       if (i < 0) return null;
       if (dir.runLengths[i] > 0) {
         if (id >= dir.tileIds[i] + dir.runLengths[i]) return null;
-        final data = _readAt(
+        return _readAt(
           _file,
           _u64(_header, 56) + dir.offsets[i],
           dir.lengths[i],
         );
-        return _decompress(data, _header.getUint8(98));
       }
       dir = _leaf(dir.offsets[i], dir.lengths[i]);
     }

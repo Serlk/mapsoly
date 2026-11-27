@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import '../../../offline/pmtiles.dart';
 import '../../../traffic/traffic.dart';
 import '../../../traffic/yandex_tile_provider.dart';
 
@@ -13,14 +14,15 @@ import '../../../traffic/yandex_tile_provider.dart';
 class TileRequest {
   const TileRequest(this.kind, this.version, this.z, this.x, this.y);
 
-  /// `osm`, `google` or `yandex`.
+  /// `osm`, `google`, `yandex` or `packs`.
   final String kind;
 
-  /// Data version of a traffic layer; empty for `osm`.
+  /// Data version of a traffic layer, id of a pack set; empty for `osm`.
   final String version;
   final int z, x, y;
 
-  /// Parses `/osm/{z}/{x}/{y}.png` and `/{google|yandex}/{version}/{z}/{x}/{y}.png`.
+  /// Parses `/osm/{z}/{x}/{y}.png`, `/{google|yandex}/{version}/{z}/{x}/{y}.png`
+  /// and `/packs/{set}/{z}/{x}/{y}.pbf`.
   /// Null for anything else, including coordinates outside the tile pyramid.
   static TileRequest? parse(String path) {
     final parts = path.split('/').where((p) => p.isNotEmpty).toList();
@@ -29,7 +31,8 @@ class TileRequest {
     final String version;
     if (kind == 'osm' && parts.length == 4) {
       version = '';
-    } else if ((kind == 'google' || kind == 'yandex') && parts.length == 5) {
+    } else if ((kind == 'google' || kind == 'yandex' || kind == 'packs') &&
+        parts.length == 5) {
       version = parts[1];
       if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]*$').hasMatch(version)) {
         return null;
@@ -38,7 +41,7 @@ class TileRequest {
       return null;
     }
     final last = parts.last;
-    if (!last.endsWith('.png')) return null;
+    if (!last.endsWith(kind == 'packs' ? '.pbf' : '.png')) return null;
     final z = int.tryParse(parts[parts.length - 3]);
     final x = int.tryParse(parts[parts.length - 2]);
     final y = int.tryParse(last.substring(0, last.length - 4));
@@ -72,6 +75,7 @@ class TileRequest {
 ///   /osm/{z}/{x}/{y}.png                 OpenStreetMap raster tiles (no pack installed)
 ///   /google/{version}/{z}/{x}/{y}.png    Google traffic, proxied with browser headers
 ///   /yandex/{version}/{z}/{x}/{y}.png    Yandex traffic, reprojected to EPSG:3857
+///   /packs/{set}/{z}/{x}/{y}.pbf         vector tile from whichever installed pack has it
 class MapTileServer {
   MapTileServer._(this._server);
 
@@ -94,6 +98,16 @@ class MapTileServer {
   /// map engine whenever a traffic overlay is shown.
   http.Client? trafficClient;
 
+  final Map<String, List<PmTilesArchive>> _packSets = {};
+
+  /// Serves [archives] as one tile set named [id]; returns its URL template.
+  String servePacks(String id, List<PmTilesArchive> archives) {
+    _packSets[id] = List.of(archives);
+    return 'http://127.0.0.1:${_server.port}/packs/$id/{z}/{x}/{y}.pbf';
+  }
+
+  void dropPacks(String id) => _packSets.remove(id);
+
   String urlTemplate(String kind, [String version = '']) =>
       'http://127.0.0.1:${_server.port}/$kind/'
       '${version.isEmpty ? '' : '$version/'}{z}/{x}/{y}.png';
@@ -104,6 +118,27 @@ class MapTileServer {
       final tile = TileRequest.parse(request.uri.path);
       if (tile == null) {
         response.statusCode = HttpStatus.notFound;
+        return;
+      }
+      if (tile.kind == 'packs') {
+        final hit = tileFromPacks(
+          _packSets[tile.version] ?? const [],
+          tile.z,
+          tile.x,
+          tile.y,
+        );
+        if (hit == null) {
+          response.statusCode = HttpStatus.noContent;
+          return;
+        }
+        response.headers
+          ..contentType = ContentType('application', 'x-protobuf')
+          ..set(HttpHeaders.cacheControlHeader, 'max-age=86400');
+        // Stored bytes go out as they are: the client inflates them.
+        if (hit.gzipped) {
+          response.headers.set(HttpHeaders.contentEncodingHeader, 'gzip');
+        }
+        response.add(hit.bytes);
         return;
       }
       final bytes = await _load(tile);
@@ -144,4 +179,30 @@ class MapTileServer {
     image.dispose();
     return png?.buffer.asUint8List();
   }
+}
+
+/// The tile from the first of [archives] that has it, as stored there.
+/// Packs cut from one tileset hold identical tiles along their borders, so
+/// which one answers does not matter.
+({Uint8List bytes, bool gzipped})? tileFromPacks(
+  List<PmTilesArchive> archives,
+  int z,
+  int x,
+  int y,
+) {
+  for (final archive in archives) {
+    final bytes = archive.storedTile(z, x, y);
+    if (bytes != null) return (bytes: bytes, gzipped: archive.tilesGzipped);
+  }
+  return null;
+}
+
+/// Zoom range covered by a set of packs.
+({int min, int max}) zoomRangeOfPacks(List<PmTilesArchive> archives) {
+  var min = archives.first.minZoom, max = archives.first.maxZoom;
+  for (final a in archives.skip(1)) {
+    if (a.minZoom < min) min = a.minZoom;
+    if (a.maxZoom > max) max = a.maxZoom;
+  }
+  return (min: min, max: max);
 }

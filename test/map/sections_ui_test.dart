@@ -7,11 +7,15 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mapsoly/map/route_controller.dart';
+import 'package:mapsoly/obd/obd_service.dart';
+import 'package:mapsoly/obd/obd_widgets.dart';
 import 'package:mapsoly/map/routes_screen.dart';
 import 'package:mapsoly/routing/valhalla_client.dart';
 import 'package:mapsoly/settings.dart';
 import 'package:mapsoly/settings_screen.dart';
 import 'package:mapsoly/traffic/traffic.dart';
+
+import '../obd/fake_elm.dart';
 
 /// Renders the settings and routes sections above a bottom bar at the Titan
 /// 2's window size and fails on layout overflow. With `UI_SHOTS=dir` it
@@ -101,6 +105,7 @@ void main() {
       settings: settings!,
       traffic: traffic,
       positioning: null,
+      obd: null,
       onOpenPacks: () {},
     );
     await show(tester, 'settings', screen, 3);
@@ -147,5 +152,96 @@ void main() {
     );
     expect(find.text('На карте'), findsOneWidget);
     expect(find.text('Сбросить'), findsOneWidget);
+  });
+
+  testWidgets('car section, map chip and vehicle sheet with a live adapter', (
+    tester,
+  ) async {
+    final settings = (await tester.runAsync(AppSettings.load))!;
+    final fake =
+        FakeElm(
+            speedKmh: 72,
+            pids: {0x01, 0x05, 0x0C, 0x2F, 0x51, 0x5E},
+            troubleCodes: const ['0133'],
+          )
+          ..fuelRateLph = 4.6
+          ..coolantC = 92;
+    final service = ObdService(
+      logDirectory: Directory.systemTemp,
+      connector: (_) =>
+          () async => fake,
+    );
+    addTearDown(service.dispose);
+    const config = ObdConfig(
+      enabled: true,
+      address: 'AA:BB:CC:00:00:01',
+      fuel: true,
+      vehicleInfo: true,
+    );
+    settings.obd = config;
+    // Let the emulated adapter connect and report every value once.
+    await tester.runAsync(() async {
+      await service.apply(config);
+      for (var i = 0; i < 200; i++) {
+        final t = service.telemetry;
+        if (service.connected &&
+            t.fuelRateLph != null &&
+            t.rpm != null &&
+            t.coolantC != null &&
+            t.fuelLevelPercent != null &&
+            t.batteryVolts != null) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+    });
+    expect(service.connected, isTrue);
+
+    await show(
+      tester,
+      'settings_car',
+      SingleChildScrollView(
+        child: ObdSettingsSection(settings: settings, service: service),
+      ),
+      3,
+    );
+    expect(find.textContaining('Подключено'), findsOneWidget);
+
+    await show(
+      tester,
+      'vehicle_chip',
+      Align(
+        alignment: Alignment.topLeft,
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: VehicleChip(service: service),
+        ),
+      ),
+      1,
+    );
+    // Check-engine codes turn the chip into a warning.
+    expect(find.byIcon(Icons.warning_amber_rounded), findsOneWidget);
+    expect(find.textContaining('л/100'), findsOneWidget);
+
+    await show(tester, 'vehicle_sheet', VehicleSheet(service: service), 1);
+    expect(find.text('WVWZZZ1JZXW000001'), findsOneWidget);
+    expect(find.textContaining('P0133'), findsOneWidget);
+    expect(find.text('72 км/ч'), findsOneWidget);
+    // Stop the polling loop before the test ends.
+    await tester.runAsync(() => service.apply(const ObdConfig()));
+  });
+
+  testWidgets('no adapter: the chip takes no space', (tester) async {
+    final service = ObdService(logDirectory: Directory.systemTemp);
+    await show(
+      tester,
+      'vehicle_chip_absent',
+      Align(
+        alignment: Alignment.topLeft,
+        child: VehicleChip(service: service),
+      ),
+      1,
+    );
+    expect(tester.getSize(find.byType(VehicleChip)), Size.zero);
   });
 }

@@ -3,12 +3,14 @@ import 'dart:ffi' hide Size;
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../../offline/pmtiles.dart';
 import 'flutter_map_engine.dart';
 import 'map_engine.dart';
 import 'maplibre/bridge.dart';
@@ -57,6 +59,20 @@ class MapLibreViewController implements MapViewController {
   Size _size = Size.zero;
   _MapLibreViewState? _view;
 
+  /// Parts of the view under other UI (`MediaQuery.padding` where the view
+  /// is built). "Centre" for the screen is the centre of what is left.
+  EdgeInsets _insets = EdgeInsets.zero;
+
+  /// The visible centre, in logical pixels from the view centre.
+  Offset get _visibleCentre => Offset(
+    (_insets.left - _insets.right) / 2,
+    (_insets.top - _insets.bottom) / 2,
+  );
+
+  /// The camera that shows [center] in the middle of the visible part.
+  MapCamera _cameraFor(LatLng center, double zoom, double bearing) =>
+      MapCamera(center, zoom, bearing).panned(_visibleCentre);
+
   /// Set when the native map could not be created: the Flutter engine draws
   /// instead and every call is passed on to its controller.
   FlutterMapViewController? _fallback;
@@ -65,7 +81,7 @@ class MapLibreViewController implements MapViewController {
   bool get ready => _fallback?.ready ?? (_camera != null && !_size.isEmpty);
 
   @override
-  LatLng get center => _fallback?.center ?? _camera!.center;
+  LatLng get center => _fallback?.center ?? _camera!.latLngAt(_visibleCentre);
 
   @override
   double get zoom => _fallback?.zoom ?? _camera!.zoom;
@@ -78,7 +94,7 @@ class MapLibreViewController implements MapViewController {
     final fallback = _fallback;
     if (fallback != null) return fallback.move(center, zoom);
     _view?._moveCamera(
-      MapCamera(
+      _cameraFor(
         center,
         zoom.clamp(MapCamera.minZoom, MapCamera.maxZoom).toDouble(),
         _camera?.bearing ?? 0,
@@ -93,7 +109,12 @@ class MapLibreViewController implements MapViewController {
     final camera = MapCamera.fit(
       points,
       _size,
-      EdgeInsetsLike(padding.left, padding.top, padding.right, padding.bottom),
+      EdgeInsetsLike(
+        padding.left + _insets.left,
+        padding.top + _insets.top,
+        padding.right + _insets.right,
+        padding.bottom + _insets.bottom,
+      ),
     );
     if (camera != null) _view?._moveCamera(camera);
   }
@@ -201,6 +222,8 @@ class _MapLibreViewState extends State<MapLibreView>
   // style by itself, alternately after <ms> and after 80 ms (a second switch
   // while the first style is still loading), to exercise style changes
   // without touching the screen.
+  bool _ownInitialCamera = false;
+  bool _insetsKnown = false;
   bool _benchStarted = false;
   Timer? _benchTimer;
   bool _flipped = false;
@@ -223,6 +246,7 @@ class _MapLibreViewState extends State<MapLibreView>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _ownInitialCamera = widget.controller._camera == null;
     widget.controller
       .._view = this
       .._camera ??= MapCamera(
@@ -357,6 +381,7 @@ class _MapLibreViewState extends State<MapLibreView>
     _rect = rect;
     _scale = scale;
     _applied = null;
+    _appliedBlur = null;
     _loadingStyle = null;
     final env = Platform.environment;
     // Debug hook: one CSV row per rendered frame.
@@ -430,14 +455,15 @@ class _MapLibreViewState extends State<MapLibreView>
     }
     final traffic = scene.traffic;
     final colors = _colors(scheme);
-    final offline = scene.offline;
+    final packs = _packs(scene);
     return SceneState(
       // A pack that was replaced while the app runs is a new object with,
       // possibly, the same path: the style is reloaded for it as well.
-      style:
-          '${_dark ? 'dark' : 'bright'}|${offline?.path ?? ''}|'
-          '${offline == null ? 0 : identityHashCode(offline)}|'
-          '${colors.primary}|${colors.surface}|${colors.outline}',
+      style: packs == null
+          ? _styleLoading
+          : '${_dark ? 'dark' : 'bright'}|'
+                '${[for (final p in packs) '${p.path}#${identityHashCode(p.archive)}'].join(',')}|'
+                '${colors.primary}|${colors.surface}|${colors.outline}',
       routes: _routesJson,
       points: pointsGeoJson(
         position: scene.position,
@@ -450,10 +476,58 @@ class _MapLibreViewState extends State<MapLibreView>
     );
   }
 
+  /// Style key of "the packs are still being opened": nothing is loaded.
+  static const _styleLoading = 'loading';
+
+  /// Debug hooks. MAPSOLY_MAP_PACKS=/a.pmtiles:/b.pmtiles draws these archives
+  /// instead of the scene's packs; MAPSOLY_MAP_PACK_SERVER=1 sends even a
+  /// single pack through the tile server (to compare with direct reading).
+  static final bool _servePacksAlways =
+      Platform.environment['MAPSOLY_MAP_PACK_SERVER'] == '1';
+  static final List<({String path, PmTilesArchive archive})>? _debugPacks = () {
+    final paths = Platform.environment['MAPSOLY_MAP_PACKS'];
+    if (paths == null || paths.isEmpty) return null;
+    return [
+      for (final p in paths.split(':'))
+        if (p.isNotEmpty) (path: p, archive: PmTilesArchive.open(p)),
+    ];
+  }();
+  static int _packSetCounter = 0;
+  String? _servedPacks;
+
+  /// The packs to draw; null while they are still being opened.
+  List<({String path, PmTilesArchive archive})>? _packs(MapScene scene) {
+    final debug = _debugPacks;
+    if (debug != null) return debug;
+    if (scene.offlineLoading) return null;
+    return [for (final m in scene.packs) (path: m.path, archive: m.archive)];
+  }
+
+  // Blur: MAPSOLY_MAP_BLUR=0 turns it off, =strip adds a 64 px strip along
+  // the bottom edge whatever the scene says (for measuring).
+  static const _blurSigma = 18.0;
+  static final String _blurMode =
+      Platform.environment['MAPSOLY_MAP_BLUR'] ?? '';
+  List<double> _wantedBlur = const [];
+  List<double>? _appliedBlur;
+
+  List<double> _blurOf(MapScene scene, Size size) {
+    if (_blurMode == '0') return const [];
+    return [
+      for (final r in scene.blurRects) ...[r.left, r.top, r.width, r.height],
+      if (_blurMode == 'strip') ...[0, size.height - 64, size.width, 64],
+    ];
+  }
+
   /// Sends whatever differs between the wanted scene and the shown one.
   void _syncScene() {
     final map = _map, wanted = _wanted, bridge = _bridge;
     if (map == null || wanted == null || bridge == null) return;
+    if (!listEquals(_wantedBlur, _appliedBlur)) {
+      _appliedBlur = _wantedBlur;
+      bridge.setBlur(map, _wantedBlur, _blurSigma);
+    }
+    if (wanted.style == _styleLoading) return;
     final traffic = widget.scene.traffic;
     if (traffic != null) _tiles!.trafficClient = traffic.client;
     for (final op in diffScene(_applied, wanted)) {
@@ -510,15 +584,31 @@ class _MapLibreViewState extends State<MapLibreView>
     final colors = _colors(Theme.of(context).colorScheme);
     final dark = _dark;
     final name = dark ? 'dark' : 'bright';
-    final offline = scene.offline;
+    final packs = _packs(scene) ?? const [];
     final String json;
-    if (offline != null) {
+    if (packs.isNotEmpty) {
+      // One pack: MapLibre reads the archive itself. Several: the tile
+      // server answers each tile from whichever pack has it.
+      VectorTiles? served;
+      if (packs.length > 1 || _servePacksAlways) {
+        final archives = [for (final p in packs) p.archive];
+        final range = zoomRangeOfPacks(archives);
+        final old = _servedPacks;
+        _servedPacks = 'set${++_packSetCounter}';
+        served = VectorTiles(
+          _tiles!.servePacks(_servedPacks!, archives),
+          range.min,
+          range.max,
+        );
+        if (old != null) _tiles!.dropPacks(old);
+      }
       json = buildVectorStyle(
         bundledStyleJson: await rootBundle.loadString(
           'assets/styles/$name.json',
         ),
         name: name,
-        pmtilesPath: offline.path,
+        pmtilesPath: served == null ? packs.single.path : null,
+        tiles: served,
         assetsDir: MapLibreEngine.assetsDirectory,
         colors: colors,
       );
@@ -673,8 +763,8 @@ class _MapLibreViewState extends State<MapLibreView>
     _cameraReport = null;
     if (!_cameraDirty || _disposed) return;
     _cameraDirty = false;
-    final camera = widget.controller._camera!;
-    widget.onCameraChanged(camera.center, camera.zoom);
+    final controller = widget.controller;
+    widget.onCameraChanged(controller.center, controller._camera!.zoom);
   }
 
   void _startFling() {
@@ -737,11 +827,31 @@ class _MapLibreViewState extends State<MapLibreView>
       );
     }
     final scheme = Theme.of(context).colorScheme;
+    // UI the view continues under (a bottom bar with extendBody): the
+    // attribution and the "centre" of the camera keep clear of it.
+    final insets = MediaQuery.paddingOf(context);
+    final controller = widget.controller;
+    if (controller._insets != insets) {
+      final first = !_insetsKnown;
+      _insetsKnown = true;
+      final camera = controller._camera;
+      // The initial centre is meant for the visible part as well.
+      final centre = first && _ownInitialCamera ? camera?.center : null;
+      controller._insets = insets;
+      if (centre != null) {
+        controller._camera = controller._cameraFor(
+          centre,
+          camera!.zoom,
+          camera.bearing,
+        );
+      }
+    }
     _wanted = _describe(widget.scene, scheme);
-    _syncScene();
     return LayoutBuilder(
       builder: (context, constraints) {
         widget.controller._size = constraints.biggest;
+        _wantedBlur = _blurOf(widget.scene, constraints.biggest);
+        _syncScene();
         // The rectangle on screen is known after layout.
         WidgetsBinding.instance.addPostFrameCallback((_) => _syncGeometry());
         return Listener(
@@ -770,7 +880,7 @@ class _MapLibreViewState extends State<MapLibreView>
             child: Align(
               alignment: Alignment.bottomRight,
               child: Padding(
-                padding: const EdgeInsets.all(2),
+                padding: insets + const EdgeInsets.all(2),
                 child: Text(
                   '© OpenStreetMap contributors',
                   style: TextStyle(

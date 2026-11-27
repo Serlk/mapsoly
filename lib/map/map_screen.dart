@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../obd/obd_service.dart';
+import '../obd/obd_widgets.dart';
 import '../offline/offline_map.dart';
 import '../packs/pack_store.dart';
 import '../packs/packs_screen.dart';
@@ -56,7 +59,30 @@ class _MapScreenState extends State<MapScreen> {
   bool get _searching => _section == _Section.search;
 
   void _open(_Section section) => setState(() => _section = section);
+
+  /// True when "back" has something to close inside this screen.
+  bool get _canGoBack =>
+      _section != _Section.navigator ||
+      _picked != null ||
+      _route.guiding ||
+      _route.active;
+
+  /// "Back": undo the most recent step, one at a time — leave a section,
+  /// drop the picked point, stop guidance, then close the route.
+  void _goBack() {
+    if (_section != _Section.navigator) {
+      _open(_Section.navigator);
+    } else if (_picked != null) {
+      setState(() => _picked = null);
+    } else if (_route.guiding) {
+      _route.stopGuidance();
+    } else if (_route.active) {
+      _route.clear();
+    }
+  }
+
   PositioningNotifier? _positioning;
+  ObdService? _obd;
   Timer? _simulation;
   bool _demoStarted = false;
   bool _presetApplied = false;
@@ -74,6 +100,7 @@ class _MapScreenState extends State<MapScreen> {
     _route.addListener(_onRouteChanged);
     _route.trafficSampler = _traffic.sampler;
     _startPositioning();
+    _startObd();
     widget.settings.addListener(_applyLocationSettings);
     _loadOffline();
   }
@@ -126,6 +153,7 @@ class _MapScreenState extends State<MapScreen> {
   void dispose() {
     _saveCamera?.cancel();
     widget.settings.removeListener(_applyLocationSettings);
+    _obd?.dispose();
     final positioning = _positioning;
     if (positioning != null) {
       positioning.removeListener(_onPosition);
@@ -239,7 +267,29 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  /// Connects to the ELM327 adapter according to the settings. Its speed
+  /// feeds the positioning filter, which is what keeps the position moving
+  /// when there is no satellite fix.
+  Future<void> _startObd() async {
+    final dir = await getApplicationSupportDirectory();
+    if (!mounted) return;
+    final service = ObdService(
+      logDirectory: Directory('${dir.path}/obd-logs'),
+      position: () {
+        final fix = _positioning?.estimate;
+        return fix == null ? null : (lat: fix.lat, lon: fix.lon);
+      },
+      onSpeed: (sample) => _positioning?.engine.addSpeedSample(
+        sample.speedMps,
+        time: sample.time,
+      ),
+    );
+    setState(() => _obd = service);
+    await service.apply(widget.settings.obd);
+  }
+
   void _applyLocationSettings() {
+    _obd?.apply(widget.settings.obd);
     final engine = _positioning?.engine;
     if (engine == null) return;
     engine.onlineLookups = widget.settings.onlineLocation;
@@ -290,8 +340,11 @@ class _MapScreenState extends State<MapScreen> {
     if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (context) =>
-            PacksScreen(store: store, onChanged: _loadOffline),
+        builder: (context) => PacksScreen(
+          store: store,
+          catalogUrl: widget.settings.catalogUrl,
+          onChanged: _loadOffline,
+        ),
       ),
     );
     store.close();
@@ -352,6 +405,7 @@ class _MapScreenState extends State<MapScreen> {
       bindings: _searching
           ? const {}
           : {
+              const SingleActivator(LogicalKeyboardKey.escape): _goBack,
               const SingleActivator(LogicalKeyboardKey.slash): () =>
                   _open(_Section.search),
               const SingleActivator(
@@ -374,184 +428,253 @@ class _MapScreenState extends State<MapScreen> {
               const SingleActivator(LogicalKeyboardKey.keyT): _cycleTraffic,
               const SingleActivator(LogicalKeyboardKey.keyD): _cycleTheme,
             },
-      child: Focus(
-        autofocus: true,
-        child: Scaffold(
-          body: ListenableBuilder(
-            listenable: Listenable.merge([_traffic, _route, _positioning]),
-            builder: (context, _) => LayoutBuilder(
-              builder: (context, box) {
-                // Square and landscape screens (Titan 2 is 720x686 logical px) have
-                // no spare height: keep every control on the side edges.
-                final short = box.maxHeight < box.maxWidth * 1.3;
-                return Stack(
-                  children: [
-                    // While search covers the screen the map is not drawn, so
-                    // typing does not compete with map rendering.
-                    buildMapView(
-                      visible: _section == _Section.navigator,
-                      controller: _map,
-                      scene: _scene(context),
-                      initialCenter:
-                          widget.settings.center ??
-                          const LatLng(55.7522, 37.6156),
-                      initialZoom: widget.settings.zoom ?? 11,
-                      onLongPress: (point) => setState(() {
-                        _picked = point;
-                        _pickedLabel = null;
-                      }),
-                      onCameraChanged: (center, zoom) {
-                        _saveCamera?.cancel();
-                        _saveCamera = Timer(
-                          const Duration(seconds: 1),
-                          () => widget.settings.saveCamera(center, zoom),
-                        );
-                      },
-                    ),
-                    SafeArea(
-                      minimum: const EdgeInsets.all(8),
-                      child: Stack(
-                        children: [
-                          if (!_route.guiding)
-                            Align(
-                              alignment: short
-                                  ? Alignment.topLeft
-                                  : Alignment.bottomCenter,
-                              child: Padding(
-                                padding: EdgeInsets.only(
-                                  bottom: short ? 0 : 24,
-                                ),
-                                child: _TrafficSwitch(
-                                  controller: _traffic,
-                                  vertical: short,
-                                ),
-                              ),
-                            ),
-                          if (_route.guiding && _route.selected != null)
-                            Align(
-                              alignment: Alignment.topCenter,
-                              child: Padding(
-                                padding: const EdgeInsets.only(right: 56),
-                                child: GuidanceBanner(controller: _route),
-                              ),
-                            )
-                          else if (_picked != null || _route.active)
-                            Align(
-                              alignment: short
-                                  ? Alignment.bottomLeft
-                                  : Alignment.bottomCenter,
-                              child: Padding(
-                                padding: EdgeInsets.only(
-                                  bottom: short ? 28 : 84,
-                                  right: short ? 64 : 0,
-                                ),
-                                child: ConstrainedBox(
-                                  constraints: const BoxConstraints(
-                                    maxWidth: 380,
-                                  ),
-                                  child: _picked != null
-                                      ? PickedPointCard(
-                                          point: _picked!,
-                                          label: _pickedLabel,
-                                          onTo: () {
-                                            _route.setTo(
-                                              _picked!,
-                                              label: _pickedLabel,
-                                            );
-                                            setState(() => _picked = null);
-                                          },
-                                          onFrom: () {
-                                            _route.setFrom(
-                                              _picked!,
-                                              label: _pickedLabel,
-                                            );
-                                            setState(() => _picked = null);
-                                          },
-                                          onClose: () =>
-                                              setState(() => _picked = null),
-                                        )
-                                      : RoutePanel(controller: _route),
-                                ),
-                              ),
-                            ),
-                          Align(
-                            alignment: Alignment.centerRight,
-                            child: _MapButtons(
-                              onMyPosition: _goToMyPosition,
-                              onLocationDetails: _showLocation,
-                              hasFix: _positioning?.estimate != null,
-                              onZoom: _zoom,
-                            ),
-                          ),
-                        ],
+      child: ListenableBuilder(
+        // Rebuilt with the route, so "back" always knows what is open.
+        listenable: _route,
+        // The system or hardware back key lands here while there is
+        // something to close; with nothing left it leaves the app.
+        builder: (context, child) => PopScope(
+          canPop: !_canGoBack,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) _goBack();
+          },
+          child: child!,
+        ),
+        child: Focus(
+          autofocus: true,
+          child: Scaffold(
+            // The map continues under the translucent bottom bar.
+            extendBody: true,
+            body: ListenableBuilder(
+              listenable: Listenable.merge([_traffic, _route, _positioning]),
+              builder: (context, _) => LayoutBuilder(
+                builder: (context, box) {
+                  // Square and landscape screens (Titan 2 is 720x686 logical px) have
+                  // no spare height: keep every control on the side edges.
+                  final short = box.maxHeight < box.maxWidth * 1.3;
+                  return Stack(
+                    children: [
+                      // While search covers the screen the map is not drawn, so
+                      // typing does not compete with map rendering.
+                      buildMapView(
+                        visible: _section == _Section.navigator,
+                        controller: _map,
+                        scene: _scene(context),
+                        initialCenter:
+                            widget.settings.center ??
+                            const LatLng(55.7522, 37.6156),
+                        initialZoom: widget.settings.zoom ?? 11,
+                        onLongPress: (point) => setState(() {
+                          _picked = point;
+                          _pickedLabel = null;
+                        }),
+                        onCameraChanged: (center, zoom) {
+                          _saveCamera?.cancel();
+                          _saveCamera = Timer(
+                            const Duration(seconds: 1),
+                            () => widget.settings.saveCamera(center, zoom),
+                          );
+                        },
                       ),
-                    ),
-                    if (_searching)
-                      Positioned.fill(
-                        child: Material(
-                          color: Theme.of(context).colorScheme.surface,
-                          child: SafeArea(
-                            child: SearchPanel(
-                              database: _places,
-                              online: _photon,
-                              near: _searchNear(),
-                              initialQuery: _initialQuery,
-                              onSelected: _onPlaceSelected,
-                              onClose: () => _open(_Section.navigator),
+                      SafeArea(
+                        minimum: const EdgeInsets.all(8),
+                        child: Stack(
+                          children: [
+                            if (!_route.guiding)
+                              Align(
+                                alignment: short
+                                    ? Alignment.topLeft
+                                    : Alignment.bottomCenter,
+                                child: Padding(
+                                  padding: EdgeInsets.only(
+                                    bottom: short ? 0 : 24,
+                                  ),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      _TrafficSwitch(
+                                        controller: _traffic,
+                                        vertical: short,
+                                      ),
+                                      if (_obd != null)
+                                        VehicleChip(service: _obd!),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            if (_route.guiding && _route.selected != null)
+                              Align(
+                                alignment: Alignment.topCenter,
+                                child: Padding(
+                                  padding: const EdgeInsets.only(right: 56),
+                                  child: GuidanceBanner(controller: _route),
+                                ),
+                              )
+                            else if (_picked != null || _route.active)
+                              Align(
+                                alignment: short
+                                    ? Alignment.bottomLeft
+                                    : Alignment.bottomCenter,
+                                child: Padding(
+                                  padding: EdgeInsets.only(
+                                    bottom: short ? 28 : 84,
+                                    right: short ? 64 : 0,
+                                  ),
+                                  child: ConstrainedBox(
+                                    constraints: const BoxConstraints(
+                                      maxWidth: 380,
+                                    ),
+                                    child: _picked != null
+                                        ? PickedPointCard(
+                                            point: _picked!,
+                                            label: _pickedLabel,
+                                            onTo: () {
+                                              _route.setTo(
+                                                _picked!,
+                                                label: _pickedLabel,
+                                              );
+                                              setState(() => _picked = null);
+                                            },
+                                            onFrom: () {
+                                              _route.setFrom(
+                                                _picked!,
+                                                label: _pickedLabel,
+                                              );
+                                              setState(() => _picked = null);
+                                            },
+                                            onClose: () =>
+                                                setState(() => _picked = null),
+                                          )
+                                        : RoutePanel(controller: _route),
+                                  ),
+                                ),
+                              ),
+                            if (_route.guiding && _obd != null)
+                              Align(
+                                alignment: Alignment.bottomLeft,
+                                child: VehicleChip(service: _obd!),
+                              ),
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: _MapButtons(
+                                onMyPosition: _goToMyPosition,
+                                onLocationDetails: _showLocation,
+                                hasFix: _positioning?.estimate != null,
+                                onZoom: _zoom,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (_searching)
+                        Positioned.fill(
+                          child: Material(
+                            color: Theme.of(context).colorScheme.surface,
+                            child: SafeArea(
+                              child: SearchPanel(
+                                database: _places,
+                                online: _photon,
+                                near: _searchNear(),
+                                initialQuery: _initialQuery,
+                                onSelected: _onPlaceSelected,
+                                onClose: () => _open(_Section.navigator),
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                    if (_section == _Section.routes ||
-                        _section == _Section.settings)
-                      Positioned.fill(
-                        child: Material(
-                          color: Theme.of(context).colorScheme.surface,
-                          child: SafeArea(
-                            child: _section == _Section.routes
-                                ? RoutesScreen(
-                                    route: _route,
-                                    onShowOnMap: () =>
-                                        _open(_Section.navigator),
-                                    onSearch: () => _open(_Section.search),
-                                  )
-                                : SettingsScreen(
-                                    settings: widget.settings,
-                                    traffic: _traffic,
-                                    positioning: _positioning,
-                                    onOpenPacks: _showPacks,
-                                  ),
+                      if (_section == _Section.routes ||
+                          _section == _Section.settings)
+                        Positioned.fill(
+                          child: Material(
+                            color: Theme.of(context).colorScheme.surface,
+                            child: SafeArea(
+                              child: _section == _Section.routes
+                                  ? RoutesScreen(
+                                      route: _route,
+                                      onShowOnMap: () =>
+                                          _open(_Section.navigator),
+                                      onSearch: () => _open(_Section.search),
+                                    )
+                                  : SettingsScreen(
+                                      settings: widget.settings,
+                                      traffic: _traffic,
+                                      positioning: _positioning,
+                                      obd: _obd,
+                                      onOpenPacks: _showPacks,
+                                    ),
+                            ),
                           ),
                         ),
-                      ),
-                  ],
-                );
-              },
+                    ],
+                  );
+                },
+              ),
+            ),
+            // The main sections sit under the thumb; more can be added here.
+            bottomNavigationBar: _FrostedBar(
+              child: NavigationBar(
+                backgroundColor: Colors.transparent,
+                surfaceTintColor: Colors.transparent,
+                elevation: 0,
+                height: 64,
+                selectedIndex: _section.index,
+                onDestinationSelected: (i) => _open(_Section.values[i]),
+                destinations: const [
+                  NavigationDestination(
+                    icon: Icon(Icons.search),
+                    label: 'Поиск',
+                  ),
+                  NavigationDestination(
+                    icon: Icon(Icons.navigation_outlined),
+                    selectedIcon: Icon(Icons.navigation),
+                    label: 'Навигатор',
+                  ),
+                  NavigationDestination(
+                    icon: Icon(Icons.alt_route),
+                    label: 'Маршруты',
+                  ),
+                  NavigationDestination(
+                    icon: Icon(Icons.settings_outlined),
+                    selectedIcon: Icon(Icons.settings),
+                    label: 'Настройки',
+                  ),
+                ],
+              ),
             ),
           ),
-          // The main sections sit under the thumb; more can be added here.
-          bottomNavigationBar: NavigationBar(
-            height: 64,
-            selectedIndex: _section.index,
-            onDestinationSelected: (i) => _open(_Section.values[i]),
-            destinations: const [
-              NavigationDestination(icon: Icon(Icons.search), label: 'Поиск'),
-              NavigationDestination(
-                icon: Icon(Icons.navigation_outlined),
-                selectedIcon: Icon(Icons.navigation),
-                label: 'Навигатор',
+        ),
+      ),
+    );
+  }
+}
+
+/// Translucent, blurred backing for the bottom bar.
+class _FrostedBar extends StatelessWidget {
+  const _FrostedBar({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return ClipRect(
+      child: BackdropFilter(
+        // Blurs what Flutter itself draws behind the bar. A map drawn by the
+        // native engine lies outside Flutter's scene: there the bar is only
+        // translucent unless the engine softens that strip itself.
+        filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: colors.surfaceContainer.withValues(alpha: 0.72),
+            border: Border(
+              top: BorderSide(
+                color: colors.outlineVariant.withValues(alpha: 0.5),
               ),
-              NavigationDestination(
-                icon: Icon(Icons.alt_route),
-                label: 'Маршруты',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.settings_outlined),
-                selectedIcon: Icon(Icons.settings),
-                label: 'Настройки',
-              ),
-            ],
+            ),
           ),
+          child: child,
         ),
       ),
     );

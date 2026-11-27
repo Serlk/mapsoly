@@ -91,6 +91,12 @@ class OnlineResolver {
   DateTime? _lastRequest;
   Future<void> _chain = Future.value();
 
+  /// When set, [preloadRegion] never uses a transmitter whose stored
+  /// position is private as a seed: naming it in a request would tell the
+  /// service that this device cares about that place. (The automatic
+  /// lookups are gated by the engine, which knows where the device is.)
+  PrivacyFilter? privacyFilter;
+
   /// Counters for diagnostics.
   int requests = 0;
   int failures = 0;
@@ -309,6 +315,7 @@ class OnlineResolver {
 
     void offer(String bssid, double lat, double lon) {
       if (!bounds.contains(lat, lon) || asked.contains(bssid)) return;
+      if (privacyFilter?.call(lat, lon, 0) ?? false) return;
       final (ix, iy) = cellIndex(lat, lon);
       final cell = '$ix,$iy';
       if (expanded.contains(cell)) return;

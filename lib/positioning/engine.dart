@@ -232,12 +232,15 @@ class PositioningEngine {
   ///    the radius);
   ///  * no automatic online lookup is sent (checked against the fused
   ///    estimate, the latest radio estimate and the latest GNSS fix, each
-  ///    with its accuracy circle; one of them being private is enough).
+  ///    with its accuracy circle; one of them being private is enough);
+  ///  * [preloadRegion] does not seed from the current scan, nor from
+  ///    transmitters stored at a private position.
   /// Positioning from the local database is not affected.
   PrivacyFilter? get privacyFilter => _privacy;
   set privacyFilter(PrivacyFilter? filter) {
     _privacy = filter;
     _collector.privacyFilter = filter;
+    _resolver?.privacyFilter = filter;
     _publishStatus();
   }
 

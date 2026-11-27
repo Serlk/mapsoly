@@ -13,7 +13,7 @@ extern "C" {
 #endif
 
 #define MLNB_API __attribute__((visibility("default")))
-#define MLNB_ABI_VERSION 3
+#define MLNB_ABI_VERSION 4
 
 typedef struct mlnb_map mlnb_map;
 
@@ -55,6 +55,11 @@ MLNB_API void mlnb_set_geojson(mlnb_map*, const char* source_id, const char* geo
 // Straight (not premultiplied) RGBA, width*height*4 bytes; copied before returning.
 MLNB_API void mlnb_add_image(mlnb_map*, const char* id, const uint8_t* rgba, int32_t width, int32_t height,
                              double pixel_ratio);
+
+// Rectangles of the map presented blurred (frosted glass under translucent UI): count
+// times x, y, width, height in logical pixels from the map's top-left corner; sigma in
+// logical pixels. Copied before returning. count 0 turns it off.
+MLNB_API void mlnb_set_blur(mlnb_map*, const float* xywh, int32_t count, float sigma);
 
 // Diagnostics. out3: frames rendered, last frame interval in us, frames slower than 33 ms.
 MLNB_API void mlnb_get_stats(mlnb_map*, int64_t* out3);

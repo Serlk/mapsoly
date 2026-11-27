@@ -84,6 +84,236 @@ int64_t bootMs() {
     return ts.tv_sec * 1000LL + ts.tv_nsec / 1000000;
 }
 
+// A rectangle of the map that is presented blurred (frosted glass under translucent UI).
+// Logical pixels, origin at the top-left corner of the map.
+struct BlurRect {
+    float x, y, w, h;
+};
+
+// Blurs rectangles of the default framebuffer in place, after MapLibre drew the frame:
+// the region (plus a margin of 3 sigma, so nothing outside "bleeds in" as black) is
+// scaled down by halving blits until sigma is about 4 texels, blurred there with a
+// separable Gaussian, and drawn back stretched over the rectangle. At 1/8 resolution a
+// 720x64 strip costs two passes over roughly 180x30 texels.
+class Blur {
+public:
+    ~Blur() { release(); }
+
+    void release() {
+        for (auto& slot : slots) freeSlot(slot);
+        slots.clear();
+        if (program) glDeleteProgram(program);
+        if (vao) glDeleteVertexArrays(1, &vao);
+        program = vao = 0;
+    }
+
+    // rects in logical px; sigma in logical px; fb size in physical px.
+    void run(const std::vector<BlurRect>& rects, float sigma, int scale, int fbW, int fbH) {
+        if (rects.empty() || sigma <= 0 || !ensureProgram()) return;
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_STENCIL_TEST);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glActiveTexture(GL_TEXTURE0);
+        glUseProgram(program);
+        glBindVertexArray(vao);
+        if (slots.size() < rects.size()) slots.resize(rects.size());
+        const float sigmaPx = sigma * static_cast<float>(scale);
+        const int margin = static_cast<int>(std::ceil(3 * sigmaPx));
+        for (std::size_t i = 0; i < rects.size(); ++i) {
+            const BlurRect& r = rects[i];
+            // Target rectangle in GL window coordinates (origin bottom-left), clamped.
+            const int x0 = std::max(0, static_cast<int>(std::floor(r.x * scale)));
+            const int x1 = std::min(fbW, static_cast<int>(std::ceil((r.x + r.w) * scale)));
+            const int y0 = std::max(0, fbH - static_cast<int>(std::ceil((r.y + r.h) * scale)));
+            const int y1 = std::min(fbH, fbH - static_cast<int>(std::floor(r.y * scale)));
+            if (x1 <= x0 || y1 <= y0) continue;
+            // Source: the target plus the margin, clamped to the framebuffer.
+            const int sx0 = std::max(0, x0 - margin), sx1 = std::min(fbW, x1 + margin);
+            const int sy0 = std::max(0, y0 - margin), sy1 = std::min(fbH, y1 + margin);
+            const int sw = sx1 - sx0, sh = sy1 - sy0;
+            int levels = 0;
+            while (sigmaPx / static_cast<float>(1 << levels) > 5.0f && levels < 4) ++levels;
+            Slot& slot = slots[i];
+            ensureSlot(slot, sw, sh, levels);
+
+            // Downscale by halving (each step averages 2x2: no shimmer while panning).
+            GLuint readFbo = 0;
+            int rw = sw, rh = sh, rx = sx0, ry = sy0;
+            for (const Level& lv : slot.levels) {
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, lv.fbo);
+                glBlitFramebuffer(rx, ry, rx + rw, ry + rh, 0, 0, lv.w, lv.h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                readFbo = lv.fbo;
+                rx = ry = 0;
+                rw = lv.w;
+                rh = lv.h;
+            }
+            const Level& small = slot.levels.back();
+            const float s = sigmaPx / static_cast<float>(1 << levels);
+            const int radius = std::min(32, static_cast<int>(std::ceil(2.5f * s)));
+            glUniform1f(uSigma, s);
+            glUniform1i(uRadius, radius);
+            glUniform2f(uOffset, 0, 0);
+            glUniform2f(uScale, 1, 1);
+            // Horizontal: small -> temp. Vertical: temp -> small.
+            glBindFramebuffer(GL_FRAMEBUFFER, slot.temp.fbo);
+            glViewport(0, 0, small.w, small.h);
+            glBindTexture(GL_TEXTURE_2D, small.tex);
+            glUniform2f(uDir, 1.0f / static_cast<float>(small.w), 0);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glBindFramebuffer(GL_FRAMEBUFFER, small.fbo);
+            glBindTexture(GL_TEXTURE_2D, slot.temp.tex);
+            glUniform2f(uDir, 0, 1.0f / static_cast<float>(small.h));
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            // Back onto the screen: only the target part of the blurred source.
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(x0, y0, x1 - x0, y1 - y0);
+            glBindTexture(GL_TEXTURE_2D, small.tex);
+            glUniform1i(uRadius, 0);
+            glUniform2f(uOffset, static_cast<float>(x0 - sx0) / static_cast<float>(sw),
+                        static_cast<float>(y0 - sy0) / static_cast<float>(sh));
+            glUniform2f(uScale, static_cast<float>(x1 - x0) / static_cast<float>(sw),
+                        static_cast<float>(y1 - y0) / static_cast<float>(sh));
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindVertexArray(0);
+        glUseProgram(0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+
+private:
+    struct Level {
+        GLuint tex = 0, fbo = 0;
+        int w = 0, h = 0;
+    };
+    struct Slot {
+        int sw = 0, sh = 0, count = -1;
+        std::vector<Level> levels; // [0] full size copy ... [count] smallest
+        Level temp;
+    };
+
+    static void makeLevel(Level& lv, int w, int h) {
+        lv.w = std::max(1, w);
+        lv.h = std::max(1, h);
+        glGenTextures(1, &lv.tex);
+        glBindTexture(GL_TEXTURE_2D, lv.tex);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, lv.w, lv.h);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glGenFramebuffers(1, &lv.fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, lv.fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, lv.tex, 0);
+    }
+    static void freeLevel(Level& lv) {
+        if (lv.fbo) glDeleteFramebuffers(1, &lv.fbo);
+        if (lv.tex) glDeleteTextures(1, &lv.tex);
+        lv = Level{};
+    }
+    static void freeSlot(Slot& slot) {
+        for (auto& lv : slot.levels) freeLevel(lv);
+        slot.levels.clear();
+        freeLevel(slot.temp);
+        slot.count = -1;
+    }
+    // Textures at 1/2, 1/4, ... 1/2^levels of the source; one full-size copy when
+    // there is no downscaling.
+    static void ensureSlot(Slot& slot, int sw, int sh, int levels) {
+        if (slot.sw == sw && slot.sh == sh && slot.count == levels) return;
+        freeSlot(slot);
+        slot.sw = sw;
+        slot.sh = sh;
+        slot.count = levels;
+        int w = sw, h = sh;
+        if (levels == 0) {
+            slot.levels.emplace_back();
+            makeLevel(slot.levels.back(), w, h);
+        }
+        for (int k = 0; k < levels; ++k) {
+            w = (w + 1) / 2;
+            h = (h + 1) / 2;
+            slot.levels.emplace_back();
+            makeLevel(slot.levels.back(), w, h);
+        }
+        makeLevel(slot.temp, slot.levels.back().w, slot.levels.back().h);
+    }
+
+    bool ensureProgram() {
+        if (program) return true;
+        if (failed) return false;
+        static const char* vs =
+            "#version 300 es\n"
+            "uniform vec2 uOffset; uniform vec2 uScale; out vec2 v;\n"
+            "void main() {\n"
+            "  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
+            "  v = uOffset + p * uScale;\n"
+            "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+            "}\n";
+        static const char* fs =
+            "#version 300 es\n"
+            "precision highp float;\n"
+            "uniform sampler2D t; uniform vec2 uDir; uniform float uSigma; uniform int uRadius;\n"
+            "in vec2 v; out vec4 o;\n"
+            "void main() {\n"
+            "  if (uRadius == 0) { o = vec4(texture(t, v).rgb, 1.0); return; }\n"
+            "  vec3 s = vec3(0.0); float n = 0.0;\n"
+            "  for (int i = -uRadius; i <= uRadius; i++) {\n"
+            "    float w = exp(-float(i * i) / (2.0 * uSigma * uSigma));\n"
+            "    s += texture(t, v + uDir * float(i)).rgb * w; n += w;\n"
+            "  }\n"
+            "  o = vec4(s / n, 1.0);\n"
+            "}\n";
+        auto compile = [](GLenum type, const char* src) {
+            const GLuint sh = glCreateShader(type);
+            glShaderSource(sh, 1, &src, nullptr);
+            glCompileShader(sh);
+            GLint ok = 0;
+            glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+            if (!ok) {
+                char log[512] = {0};
+                glGetShaderInfoLog(sh, sizeof(log) - 1, nullptr, log);
+                std::fprintf(stderr, "mlnb: blur shader: %s\n", log);
+            }
+            return sh;
+        };
+        const GLuint v = compile(GL_VERTEX_SHADER, vs), f = compile(GL_FRAGMENT_SHADER, fs);
+        program = glCreateProgram();
+        glAttachShader(program, v);
+        glAttachShader(program, f);
+        glLinkProgram(program);
+        glDeleteShader(v);
+        glDeleteShader(f);
+        GLint ok = 0;
+        glGetProgramiv(program, GL_LINK_STATUS, &ok);
+        if (!ok) {
+            std::fprintf(stderr, "mlnb: blur program does not link; blur is off\n");
+            glDeleteProgram(program);
+            program = 0;
+            failed = true;
+            return false;
+        }
+        uOffset = glGetUniformLocation(program, "uOffset");
+        uScale = glGetUniformLocation(program, "uScale");
+        uDir = glGetUniformLocation(program, "uDir");
+        uSigma = glGetUniformLocation(program, "uSigma");
+        uRadius = glGetUniformLocation(program, "uRadius");
+        glUseProgram(program);
+        glUniform1i(glGetUniformLocation(program, "t"), 0);
+        glGenVertexArrays(1, &vao);
+        return true;
+    }
+
+    GLuint program = 0, vao = 0;
+    GLint uOffset = -1, uScale = -1, uDir = -1, uSigma = -1, uRadius = -1;
+    bool failed = false;
+    std::vector<Slot> slots;
+};
+
 class Backend;
 
 class Resource final : public mln::gl::RenderableResource {
@@ -172,6 +402,7 @@ public:
 
     ~Backend() override {
         makeCurrent();
+        blur.release();
         context.reset(); // gl::Context of MapLibre (the Renderer is gone already)
         eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         if (eglSurface != EGL_NO_SURFACE) eglDestroySurface(dpy, eglSurface);
@@ -258,6 +489,16 @@ public:
     // previous one, then commits with a new frame callback request.
     void swapBuffers() {
         const int64_t t0 = monoUs();
+        if (!blurRects.empty()) {
+            blur.run(blurRects, blurSigma, scale, static_cast<int>(getSize().width),
+                     static_cast<int>(getSize().height));
+            // MapLibre caches GL state: everything touched above is unknown to it now.
+            auto& glContext = static_cast<mln::gl::Context&>(*context);
+            glContext.setDirtyState();
+            glContext.bindFramebuffer.setDirty();
+            glContext.viewport.setDirty();
+        }
+        lastBlurMs = (monoUs() - t0) / 1000.0;
         glFlush(); // let the GPU work while we wait
         waitFrame(kFrameWaitMs);
         stalled = frameCallback != nullptr;
@@ -279,6 +520,11 @@ public:
 
     // May a frame be drawn now? Not while the compositor is not taking frames.
     bool canRender() const { return !stalled || frameCallback == nullptr; }
+
+    std::vector<BlurRect> blurRects;
+    float blurSigma = 0;
+    double lastBlurMs = 0;
+    Blur blur;
 
     static constexpr int kFrameWaitMs = 50;
     bool stalled = false;
@@ -872,6 +1118,20 @@ void mlnb_add_image(mlnb_map* m, const char* id, const uint8_t* rgba, int32_t wi
     m->post([m, i = std::move(i), pixels, pixel_ratio] {
         m->map->getStyle().addImage(std::make_unique<mln::style::Image>(
             i, mln::util::premultiply(std::move(*pixels)), static_cast<float>(pixel_ratio)));
+    });
+}
+
+void mlnb_set_blur(mlnb_map* m, const float* xywh, int32_t count, float sigma) {
+    MLNB_CALL();
+    std::vector<BlurRect> rects;
+    for (int32_t i = 0; xywh && i < count; ++i) {
+        rects.push_back({xywh[4 * i], xywh[4 * i + 1], xywh[4 * i + 2], xywh[4 * i + 3]});
+    }
+    m->post([m, rects = std::move(rects), sigma] {
+        m->backend->blurRects = rects;
+        m->backend->blurSigma = sigma;
+        m->dirty = true;
+        m->map->triggerRepaint();
     });
 }
 

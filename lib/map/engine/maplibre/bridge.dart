@@ -21,11 +21,12 @@ class MapLibreBridge {
       _removeLayer = lib.lookupFunction<_Str1C, _Str1D>('mlnb_remove_layer'),
       _setGeoJson = lib.lookupFunction<_Str2C, _Str2D>('mlnb_set_geojson'),
       _addImage = lib.lookupFunction<_ImageC, _ImageD>('mlnb_add_image'),
+      _setBlur = lib.lookupFunction<_BlurC, _BlurD>('mlnb_set_blur'),
       _frameLog = lib.lookupFunction<_Str1C, _Str1D>('mlnb_frame_log'),
       _benchStart = lib.lookupFunction<_Str1C, _Str1D>('mlnb_bench_start'),
       _getStats = lib.lookupFunction<_StatsC, _StatsD>('mlnb_get_stats');
 
-  static const abiVersion = 3;
+  static const abiVersion = 4;
   static const eventStyleLoaded = 1;
   static const eventStyleFailed = 2;
   static const eventBenchDone = 3;
@@ -89,6 +90,7 @@ class MapLibreBridge {
   final _Str1D _removeLayer;
   final _Str2D _setGeoJson;
   final _ImageD _addImage;
+  final _BlurD _setBlur;
   final _Str1D _frameLog;
   final _Str1D _benchStart;
   final _StatsD _getStats;
@@ -204,6 +206,19 @@ class MapLibreBridge {
     }
   }
 
+  /// [xywh]: four numbers per rectangle, logical pixels; empty turns it off.
+  void setBlur(Pointer<Void> map, List<double> xywh, double sigma) {
+    final p = _malloc(xywh.length * 4 + 4).cast<Float>();
+    try {
+      for (var i = 0; i < xywh.length; i++) {
+        p[i] = xywh[i];
+      }
+      _setBlur(map, p, xywh.length ~/ 4, sigma);
+    } finally {
+      _free(p.cast());
+    }
+  }
+
   void frameLog(Pointer<Void> map, String path) =>
       _with1(path, (a) => _frameLog(map, a));
 
@@ -281,5 +296,7 @@ typedef _ImageD =
       int,
       double,
     );
+typedef _BlurC = Void Function(Pointer<Void>, Pointer<Float>, Int32, Float);
+typedef _BlurD = void Function(Pointer<Void>, Pointer<Float>, int, double);
 typedef _StatsC = Void Function(Pointer<Void>, Pointer<Int64>);
 typedef _StatsD = void Function(Pointer<Void>, Pointer<Int64>);
