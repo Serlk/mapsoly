@@ -75,10 +75,19 @@ Speeding speedingOf(double speedKmh, int? limitKmh, {int margin = 20}) {
 /// sign next to it. Over the limit the figure turns red; far over it the
 /// whole badge does.
 class Speedometer extends StatelessWidget {
-  const Speedometer({super.key, required this.speedKmh, this.limitKmh});
+  const Speedometer({
+    super.key,
+    required this.speedKmh,
+    this.limitKmh,
+    this.signFirst = false,
+  });
 
   final double speedKmh;
   final int? limitKmh;
+
+  /// The sign to the left of the speed: for the right edge of the screen,
+  /// where the speed itself keeps the corner.
+  final bool signFirst;
 
   static const double size = 76;
   static const double signSize = 54;
@@ -106,6 +115,11 @@ class Speedometer extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
+            if (limit != null && signFirst)
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: SpeedLimitSign(limitKmh: limit),
+              ),
             AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               width: size,
@@ -157,7 +171,7 @@ class Speedometer extends StatelessWidget {
                 ),
               ),
             ),
-            if (limit != null)
+            if (limit != null && !signFirst)
               Padding(
                 padding: const EdgeInsets.only(left: 6),
                 child: SpeedLimitSign(limitKmh: limit),

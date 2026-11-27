@@ -1062,7 +1062,11 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     // The speed is worth showing on the move, and during guidance always.
     final speedometer =
         speed != null && !showsCard && (_route.progress != null || speed >= 5)
-        ? Speedometer(speedKmh: speed, limitKmh: _speedLimit.limitKmh)
+        ? Speedometer(
+            speedKmh: speed,
+            limitKmh: _speedLimit.limitKmh,
+            signFirst: true,
+          )
         : null;
     final downloads = _downloads;
     final Widget buttons = hidden
@@ -1071,7 +1075,11 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
             alignment: Alignment.centerRight,
             child: Padding(
               padding: EdgeInsets.only(
-                top: narrow && showsBanner ? 170 : 0,
+                top:
+                    (narrow && showsBanner ? 170 : 0) +
+                    (narrow && speedometer != null
+                        ? Speedometer.size + Ui.gap
+                        : 0),
                 bottom: narrow && showsCard ? 270 : 0,
               ),
               child: MapButtons(
@@ -1273,11 +1281,6 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              if (speedometer != null)
-                Padding(
-                  padding: const EdgeInsets.only(right: Ui.gap),
-                  child: speedometer,
-                ),
               if (_obd != null)
                 Padding(
                   padding: const EdgeInsets.only(right: Ui.gap),
@@ -1293,9 +1296,6 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
             ],
           ),
         )
-      else if (speedometer != null)
-        // Driving without a route: the speed takes the corner.
-        Align(alignment: Alignment.bottomLeft, child: speedometer)
       else if (quick.isNotEmpty)
         // Nothing planned: home and work are one tap away.
         Align(
@@ -1315,6 +1315,16 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
                   ),
                 ),
             ],
+          ),
+        ),
+      // The speed sits in the top right corner, where drivers look for it;
+      // on a narrow phone the banner takes the full width, so under it.
+      if (speedometer != null)
+        Align(
+          alignment: Alignment.topRight,
+          child: Padding(
+            padding: EdgeInsets.only(top: narrow && showsBanner ? 170 : 0),
+            child: speedometer,
           ),
         ),
       buttonsSlot,
