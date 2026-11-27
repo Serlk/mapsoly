@@ -1,6 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Map tiles, traffic, map packs and online search. Without it a
+         release build has no network at all. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="mapsoly"
+        android:label="Mapsoly"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
