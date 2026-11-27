@@ -99,6 +99,11 @@ class SpeedLimitTracker extends ChangeNotifier {
   /// Limit of the current road, or null when unknown.
   RoadLimit? get limit => _limit;
 
+  /// The stretch of road the car was last matched to, in driving order,
+  /// ending about where it was then; empty when it is on no known road.
+  List<LatLng> get road => _road;
+  List<LatLng> _road = const [];
+
   /// Feeds the position and the direction of travel. Call it only while
   /// moving: standing still the heading means nothing.
   void update(LatLng p, double? headingDeg) {
@@ -123,6 +128,19 @@ class SpeedLimitTracker extends ChangeNotifier {
 
   void _apply(LatLng p, DrivenEdge? edge) {
     if (_disposed) return;
+    // Only real roads: a marker dragged onto a parking aisle or a footway
+    // next to the car helps nobody.
+    _road =
+        edge != null &&
+            const {
+              'road',
+              'ramp',
+              'turn_channel',
+              'living_street',
+              'service_road',
+            }.contains(edge.use)
+        ? edge.shape
+        : const [];
     final found = edge == null ? null : limitOf(edge);
     RoadLimit? next;
     if (found != null) {
@@ -143,6 +161,7 @@ class SpeedLimitTracker extends ChangeNotifier {
 
   /// Forgets the limit (the car stopped being tracked).
   void reset() {
+    _road = const [];
     _asked = null;
     _confirmed = null;
     if (_limit != null) {

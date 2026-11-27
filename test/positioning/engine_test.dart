@@ -275,6 +275,40 @@ void main() {
     },
   );
 
+  test('with the spoofing check off the receiver is taken at its word, '
+      'and nothing is learnt from it', () async {
+    engine.wardriving = true;
+    engine.spoofingCheck = false;
+    await engine.start();
+    wifi.scan = [
+      for (var i = 1; i <= 4; i++)
+        WifiObservation(bssid: mac(i), signalDbm: -60),
+      const WifiObservation(bssid: 'aa:bb:cc:00:00:88', signalDbm: -50),
+    ];
+    await engine.pollNow();
+    for (var t = 0; t < 60; t++) {
+      tick();
+      gnss.controller.add(fix(6000, 0));
+    }
+    await engine.pollNow();
+    expect(engine.status.spoofingCheck, isFalse);
+    // The check still has its opinion, for the screen.
+    expect(engine.status.spoofingSuspected, isTrue);
+    final e = engine.current!;
+    expect(haversineM(e.lat, e.lon, lat0, lon0), greaterThan(5000));
+    expect(db.get(TransmitterKind.wifi, 'aa:bb:cc:00:00:88'), isNull);
+
+    // Switched back on: the satellites are dropped again.
+    engine.spoofingCheck = true;
+    for (var t = 0; t < 3; t++) {
+      tick();
+      gnss.controller.add(fix(6000, 0));
+    }
+    await engine.pollNow();
+    final back = engine.current!;
+    expect(haversineM(back.lat, back.lon, lat0, lon0), lessThan(100));
+  });
+
   test('external speed input is accepted', () async {
     await engine.start();
     for (var t = 0; t < 5; t++) {

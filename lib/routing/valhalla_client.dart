@@ -6,6 +6,7 @@ import 'package:latlong2/latlong.dart';
 
 import 'route_models.dart';
 
+import 'polyline.dart';
 export 'polyline.dart';
 export 'route_models.dart';
 
@@ -263,6 +264,7 @@ class ValhallaClient {
             'edge.density',
             'edge.road_class',
             'edge.use',
+            'shape',
           ],
         },
       });
@@ -272,7 +274,12 @@ class ValhallaClient {
     final edges = json['edges'];
     if (edges is! List || edges.isEmpty) return null;
     final last = edges.last;
-    return last is Map<String, dynamic> ? DrivenEdge.fromJson(last) : null;
+    if (last is! Map<String, dynamic>) return null;
+    final shape = json['shape'];
+    return DrivenEdge.fromJson(
+      last,
+      shape: shape is String ? decodePolyline(shape) : const [],
+    );
   }
 
   /// Asks the backend for its version. Throws if it is not reachable.

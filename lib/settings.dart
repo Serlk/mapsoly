@@ -45,6 +45,7 @@ class AppSettings extends ChangeNotifier {
   bool _drive3d = true;
   bool _speedSound = true;
   bool _signalHeat = false;
+  bool _spoofingCheck = true;
   CompassChoice _compass = CompassChoice.auto;
   String? _magnetSensor, _accelSensor;
   PositionArrow _positionArrow = PositionArrow.chevron;
@@ -139,6 +140,18 @@ class AppSettings extends ChangeNotifier {
     _changed();
   }
 
+  /// Whether the satellites are checked for spoofing. On by default; off,
+  /// every fix is taken at its word (and nothing is added to the database
+  /// from it), which is for comparing the two and for places where the
+  /// check gets in the way.
+  bool get spoofingCheck => _spoofingCheck;
+
+  set spoofingCheck(bool value) {
+    if (value == _spoofingCheck) return;
+    _spoofingCheck = value;
+    _changed();
+  }
+
   set wardriving(bool value) {
     if (value == _wardriving) return;
     _wardriving = value;
@@ -207,6 +220,7 @@ class AppSettings extends ChangeNotifier {
         settings._drive3d = json['drive3d'] != false;
         settings._speedSound = json['speedSound'] != false;
         settings._signalHeat = json['signalHeat'] == true;
+        settings._spoofingCheck = json['spoofingCheck'] != false;
         settings._compass = _byName(CompassChoice.values, json['compass']);
         settings._magnetSensor = json['magnetSensor'] as String?;
         settings._positionArrow = _byName(
@@ -258,6 +272,7 @@ class AppSettings extends ChangeNotifier {
             'drive3d': _drive3d,
             'speedSound': _speedSound,
             'signalHeat': _signalHeat,
+            'spoofingCheck': _spoofingCheck,
             'compass': _compass.name,
             'positionArrow': _positionArrow.name,
             if (_magnetSensor != null) 'magnetSensor': _magnetSensor,

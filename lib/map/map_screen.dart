@@ -35,7 +35,9 @@ import 'point_picker.dart';
 import 'route_controller.dart';
 import 'signal_heat.dart';
 import 'speed_limit.dart';
+import 'road_snap.dart';
 import 'speedometer.dart';
+import 'steady_accuracy.dart';
 import 'route_panel.dart';
 import 'routes_screen.dart';
 import 'ui_kit.dart';
@@ -874,6 +876,13 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     final origin = view is RenderBox && view.attached
         ? view.localToGlobal(Offset.zero)
         : Offset.zero;
+    // While guiding the marker sits on the route; driving without one, on
+    // the road the car is on; otherwise on the raw fix.
+    final raw = fix == null ? _route.myPosition : LatLng(fix.lat, fix.lon);
+    final onRoad = _route.progress == null && raw != null && _chrome.moving
+        ? snapToRoad(_speedLimit.road, raw, fix?.courseDeg)
+        : null;
+    final position = _route.progress?.point ?? onRoad?.point ?? raw;
     return MapScene(
       dark: Theme.of(context).brightness == Brightness.dark,
       offline: _offline.isEmpty ? null : _offline.first,
@@ -893,23 +902,35 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
         for (var i = 0; i < routes.length; i++)
           if (i != selected) routes[i].shape,
       ],
-      from: _route.from,
+      // The start of a route is marked only when it is somewhere else: a
+      // route from here would put its dot under the position marker.
+      from: _startsHere(position) ? null : _route.from,
       to: _route.to,
       picked: _picked,
-      // While guiding the marker sits on the route; otherwise on the raw fix.
-      position:
-          _route.progress?.point ??
-          (fix == null ? _route.myPosition : LatLng(fix.lat, fix.lon)),
-      positionAccuracyM: fix?.accuracyM,
+      position: position,
+      positionAccuracyM: _steadyAccuracy.of(fix?.accuracyM, DateTime.now()),
       // Along the route when guided, along the course when moving, else
       // where the device points.
       positionHeading: _route.progress != null
           ? _route.routeBearing
+          : onRoad != null
+          ? onRoad.bearing
           : fix != null && (fix.speedMps ?? 0) > 1.5 && fix.courseDeg != null
           ? fix.courseDeg
           : _markerHeading,
       positionArrow: widget.settings.positionArrow,
     );
+  }
+
+  final _steadyAccuracy = SteadyAccuracy();
+
+  /// Whether the route begins where the device is (or is being driven).
+  bool _startsHere(LatLng? position) {
+    final from = _route.from;
+    if (from == null) return false;
+    if (_route.progress != null) return true;
+    return position != null &&
+        const Distance().as(LengthUnit.Meter, from, position) < 60;
   }
 
   void _cycleTraffic() {
@@ -1034,6 +1055,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     if (engine == null) return;
     engine.onlineLookups = widget.settings.onlineLocation;
     engine.wardriving = widget.settings.wardriving;
+    engine.spoofingCheck = widget.settings.spoofingCheck;
   }
 
   void _onPosition() {

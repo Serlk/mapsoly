@@ -80,7 +80,12 @@ class LocationSheet extends StatelessWidget {
                 // above with zeros.
                 : 'Нет связи со спутниковым приёмником: системная служба '
                       'GNSS не запущена или недоступна',
-            if (status.spoofingSuspected)
+            if (!status.spoofingCheck)
+              status.spoofingSuspected
+                  ? 'Проверка подмены выключена. Она бы спутникам не '
+                        'поверила${spoofingReason(status.gnssHealth.anomalies)}'
+                  : 'Проверка подмены GPS выключена'
+            else if (status.spoofingSuspected)
               'Похоже на подмену GPS — спутники не используются'
                   '${spoofingReason(status.gnssHealth.anomalies)}',
             if (status.jammingSuspected) 'Похоже на глушение GPS',
@@ -143,6 +148,16 @@ class LocationSheet extends StatelessWidget {
                 ),
                 value: settings.wardriving,
                 onChanged: (v) => settings.wardriving = v,
+              ),
+              SwitchListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                title: const Text('Проверять подмену GPS'),
+                subtitle: const Text(
+                  'Если выключить, спутникам верят всегда, а своя база '
+                  'не пополняется',
+                ),
+                value: settings.spoofingCheck,
+                onChanged: (v) => settings.spoofingCheck = v,
               ),
             ],
           ),

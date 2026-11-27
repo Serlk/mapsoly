@@ -32,6 +32,17 @@ void main() {
       expect(settings.signalHeat, isFalse);
     });
 
+    test('the spoofing check is on unless switched off', () async {
+      final settings = await AppSettings.load();
+      expect(settings.spoofingCheck, isTrue);
+      var told = 0;
+      settings.addListener(() => told++);
+      settings.spoofingCheck = false;
+      settings.spoofingCheck = false;
+      expect(told, 1);
+      expect((await AppSettings.load()).spoofingCheck, isFalse);
+    });
+
     test('is saved and read back, whatever the traffic choice', () async {
       final settings = await AppSettings.load();
       var told = 0;

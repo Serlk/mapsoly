@@ -483,9 +483,13 @@ class DrivenEdge {
     required this.density,
     required this.roadClass,
     required this.use,
+    this.shape = const [],
   });
 
-  factory DrivenEdge.fromJson(Map<String, dynamic> json) {
+  factory DrivenEdge.fromJson(
+    Map<String, dynamic> json, {
+    List<LatLng> shape = const [],
+  }) {
     final limit = json['speed_limit'];
     return DrivenEdge(
       // Absent or 0 is "not mapped", 255 is Valhalla's "unlimited".
@@ -495,8 +499,13 @@ class DrivenEdge {
       density: (json['density'] as num?)?.toInt(),
       roadClass: json['road_class'] as String?,
       use: json['use'] as String?,
+      shape: shape,
     );
   }
+
+  /// The matched stretch of road, in driving order, up to where the car
+  /// was; empty when the backend did not send it.
+  final List<LatLng> shape;
 
   /// Posted limit from the map data; null when it is not mapped or the
   /// road has none.

@@ -84,6 +84,7 @@ class PositioningStatus {
     this.onlineError,
     this.wifiCellConflict = false,
     this.privateArea = false,
+    this.spoofingCheck = true,
   });
 
   final bool running;
@@ -111,7 +112,12 @@ class PositioningStatus {
   final int satellitesInView;
   final int satellitesUsed;
 
-  /// True when GNSS is being ignored as probably spoofed.
+  /// False when the user has switched the spoofing check off: the verdict
+  /// in [gnssHealth] is then only shown, not acted on.
+  final bool spoofingCheck;
+
+  /// True when the check suspects spoofing (GNSS is then ignored, unless
+  /// the check is switched off).
   bool get spoofingSuspected => gnssHealth.spoofingSuspected;
   bool get jammingSuspected => gnssHealth.jammingSuspected;
 
@@ -307,6 +313,22 @@ class PositioningEngine {
     if (_wardriving == on) return;
     _wardriving = on;
     if (!on) _collector.reset();
+    _publishStatus();
+  }
+
+  /// Whether the verdict of the spoofing check is acted on. Off, every fix
+  /// with a position goes to the filter whatever the check says; the check
+  /// still runs so that its opinion can be shown. Nothing is learnt for the
+  /// database meanwhile: without the check a spoofer would write itself in.
+  bool get spoofingCheck => _spoofingCheck;
+  bool _spoofingCheck = true;
+  set spoofingCheck(bool on) {
+    if (_spoofingCheck == on) return;
+    _spoofingCheck = on;
+    _collector.reset();
+    // Either way the filter starts again from what is now believed.
+    _filter.reset();
+    _lastFedKey = null;
     _publishStatus();
   }
 
@@ -523,7 +545,7 @@ class PositioningEngine {
       }
     }
 
-    if (_wardriving && _sanity.health.settled) {
+    if (_wardriving && _spoofingCheck && _sanity.health.settled) {
       if (wifiChanged) {
         _collector.addWifi(_lastWifi, now);
         if (_lastBle.isNotEmpty) _collector.addBle(_lastBle, now);
@@ -585,7 +607,10 @@ class PositioningEngine {
       output: _current,
       private: inPrivateArea,
     );
-    if (health.usable) {
+    if (!_spoofingCheck) {
+      // The user's call: the receiver is taken at its word.
+      _filter.addGnss(fix);
+    } else if (health.usable) {
       _filter.addGnss(fix);
       if (_wardriving && health.settled) _collector.addFix(fix);
     } else if (health.spoofingSuspected) {
@@ -643,6 +668,7 @@ class PositioningEngine {
       onlineError: _resolver?.lastError,
       wifiCellConflict: _radio.wifiCellConflict,
       privateArea: inPrivateArea,
+      spoofingCheck: _spoofingCheck,
     );
     if (!_statuses.isClosed) _statuses.add(_status);
   }
