@@ -315,6 +315,7 @@ class RouteController extends ChangeNotifier {
   /// not rebuilt on every fix; guidance handles movement along it.
   void updateMyPosition(LatLng? p, {double accuracyM = 30, double? speedMps}) {
     final hadNone = _myPosition == null;
+    final was = _myPosition, wasSpeed = _speedKmh;
     _myPosition = p;
     _speedKmh = speedMps == null ? null : speedMps * 3.6;
     if (p != null && hadNone && _needStart && _stops.isNotEmpty) {
@@ -323,7 +324,12 @@ class RouteController extends ChangeNotifier {
       _changed();
       return;
     }
-    if (p != null && _guiding && _arrival == null) _advance(p, accuracyM);
+    if (p != null && _guiding && _arrival == null) {
+      _advance(p, accuracyM);
+    } else if (p == was && _speedKmh == wasSpeed) {
+      // Nothing moved: nobody needs to redraw.
+      return;
+    }
     notifyListeners();
   }
 

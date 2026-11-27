@@ -10,6 +10,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../../debug_stats.dart';
 import '../../offline/pmtiles.dart';
 import '../../platform/android_properties.dart';
 import 'flutter_map_engine.dart';
@@ -683,6 +684,7 @@ class _MapLibreViewState extends State<MapLibreView>
           if (_loadingStyle != style) _loadStyle(style);
           return;
         case SetGeoJson(:final source, :final json):
+          DebugStats.count('map.geojson.$source');
           bridge.setGeoJson(map, source, json);
         case SetTraffic(:final remove, :final add):
           if (add != null) {
@@ -926,6 +928,7 @@ class _MapLibreViewState extends State<MapLibreView>
 
   /// Makes [camera] the camera: at once, or eased over [durationMs].
   void _setCamera(MapCamera camera, {int durationMs = 0, bool linear = false}) {
+    DebugStats.count('map.setCamera');
     final controller = widget.controller;
     camera = camera.copyWith(viewHeight: controller._size.height);
     final shown = controller._shown;

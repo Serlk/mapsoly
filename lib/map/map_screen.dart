@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../debug_stats.dart';
 import '../obd/obd_service.dart';
 import '../obd/obd_widgets.dart';
 import '../offline/offline_map.dart';
@@ -540,6 +541,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   }
 
   void _onCameraMoved() {
+    DebugStats.count('camera.moved');
     if (!_map.ready) return;
     _heatView();
     if (!_tiltRestored) {
@@ -717,6 +719,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
           (widget.testHooks == null ? platformCompass(widget.settings) : null);
       if (compass == null) return;
       _compassSub ??= compass.headings.listen((h) {
+        DebugStats.count('compass');
         _compassHeading = h;
         _followPosition();
         _followCompass();
@@ -939,6 +942,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   }
 
   void _onRouteChanged() {
+    DebugStats.count('route.changed');
     final route = _route.selected;
     // Debug: a preset route with MAPSOLY_SIMULATE starts driving by itself.
     if (route != null &&
@@ -1059,6 +1063,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   }
 
   void _onPosition() {
+    DebugStats.count('position.notify');
     if (_simulation != null) return; // a demo drive owns the position
     final fix = _positioning?.estimate;
     _route.updateMyPosition(
@@ -1622,6 +1627,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
 
   @override
   Widget build(BuildContext context) {
+    DebugStats.count('screen.build');
     final onMap = _section == _Section.navigator;
     final hooks = widget.testHooks;
     return CallbackShortcuts(

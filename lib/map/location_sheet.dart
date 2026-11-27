@@ -57,7 +57,11 @@ class LocationSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return ListenableBuilder(
-      listenable: Listenable.merge([positioning, settings, access?.state]),
+      listenable: Listenable.merge([
+        positioning?.details,
+        settings,
+        access?.state,
+      ]),
       builder: (context, _) {
         final status = positioning?.status;
         final fix = status?.estimate;

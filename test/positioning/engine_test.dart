@@ -352,7 +352,16 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(statuses, isNotEmpty);
     expect(statuses.last.cellsKnown, 1);
-    expect(notified, statuses.length);
+    // Told of what changed on screen, not of every report.
+    expect(notified, greaterThan(0));
+    expect(notified, lessThan(statuses.length));
+    // More of the same: the engine reports, the screen is left alone.
+    final before = notified;
+    final reports = statuses.length;
+    await engine.pollNow();
+    await Future<void>.delayed(Duration.zero);
+    expect(statuses.length, greaterThan(reports));
+    expect(notified, before);
     expect(notifier.estimate, isNotNull);
     expect(notifier.status.running, isTrue);
     engine.onlineLookups = true; // no resolver configured: harmless

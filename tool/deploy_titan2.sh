@@ -20,7 +20,7 @@ tar czf - --exclude=./build --exclude=./.dart_tool --exclude=./android \
   --exclude=./.git --exclude=./linux/flutter/ephemeral --exclude=./data --exclude=./spike \
   --exclude=./linux/prebuilt/x86_64 . |
   ssh -i "$KEY" "$HOST" "mkdir -p $DEST && tar xzf - -C $DEST && chown -R serlk:serlk $DEST &&
-    su serlk -c 'cd $DEST && flutter --suppress-analytics build linux --release'"
+    su serlk -c 'cd $DEST && flutter --suppress-analytics build linux --release --split-debug-info=build/sym'"
 # The routing backend is a separate small binary (see lib/routing/native/).
 SHIM=data/routing-native/mapsoly_valhalla
 if [ -x "$SHIM" ]; then
