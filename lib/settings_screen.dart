@@ -1,3 +1,4 @@
+import 'sensors_screen.dart';
 import 'package:flutter/material.dart';
 
 import 'map/location_sheet.dart';
@@ -29,6 +30,7 @@ class SettingsScreen extends StatelessWidget {
     required this.positioning,
     required this.obd,
     required this.onOpenPacks,
+    this.showSensors = false,
     required this.user,
     required this.services,
     required this.files,
@@ -43,6 +45,9 @@ class SettingsScreen extends StatelessWidget {
   /// Null until the adapter service has started.
   final ObdService? obd;
   final VoidCallback onOpenPacks;
+
+  /// Offers the choice of sensors (Linux; Android needs none).
+  final bool showSensors;
   final UserData user;
   final MapServices services;
   final FileExchange files;
@@ -272,6 +277,17 @@ class SettingsScreen extends StatelessWidget {
                     ),
                   ),
                 ),
+                // Only where sensors may need picking by hand.
+                if (showSensors)
+                  BigRow(
+                    icon: Icons.explore_outlined,
+                    title: 'Датчики',
+                    subtitle: 'Компас: откуда брать показания',
+                    onTap: () => _push(
+                      context,
+                      (_) => SensorsScreen(settings: settings),
+                    ),
+                  ),
                 const SectionHeader('Безопасные зоны'),
                 BigRow(
                   icon: Icons.shield_outlined,

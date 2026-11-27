@@ -304,7 +304,7 @@ class _MapLibreViewState extends State<MapLibreView>
   final List<Timer> _trafficRemovals = [];
   // Serialising a long route on every rebuild would be wasteful: reuse the
   // string while the screen passes the same list objects.
-  Object? _routeIdentity, _alternativesIdentity;
+  Object? _routeIdentity, _alternativesIdentity, _routeTrafficIdentity;
   String _routesJson = SceneState.emptyGeoJson;
   Future<List<({String id, Uint8List rgba, int width, int height})>>? _pins;
   Object? _pinsKey;
@@ -562,10 +562,16 @@ class _MapLibreViewState extends State<MapLibreView>
   /// The scene as the strings the native map needs.
   SceneState _describe(MapScene scene, ColorScheme scheme) {
     if (!identical(scene.route, _routeIdentity) ||
-        !identical(scene.alternatives, _alternativesIdentity)) {
+        !identical(scene.alternatives, _alternativesIdentity) ||
+        !identical(scene.routeTraffic, _routeTrafficIdentity)) {
       _routeIdentity = scene.route;
       _alternativesIdentity = scene.alternatives;
-      _routesJson = routesGeoJson(scene.route, scene.alternatives);
+      _routeTrafficIdentity = scene.routeTraffic;
+      _routesJson = routesGeoJson(
+        scene.route,
+        scene.alternatives,
+        scene.routeTraffic,
+      );
     }
     final traffic = scene.traffic;
     final colors = _colors(scheme);

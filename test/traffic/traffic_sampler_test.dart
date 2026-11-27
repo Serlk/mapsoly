@@ -44,6 +44,35 @@ void main() {
     expect(e.coverage, 1);
   });
 
+  test(
+    'spans: segments of one level are joined, no data is left out',
+    () async {
+      final green = TrafficSampler((x, y, z) async => solid(93, 204, 68));
+      expect((await green.estimate(shape, segments)).spans, const [
+        TrafficSpan(0, 2, Congestion.free),
+      ]);
+      final none = TrafficSampler((x, y, z) async => null);
+      expect((await none.estimate(shape, segments)).spans, isEmpty);
+    },
+  );
+
+  test('a segment takes the worst level seen on a third of it', () {
+    List<int> counts({int free = 0, int slow = 0, int heavy = 0, int jam = 0}) {
+      final c = List<int>.filled(Congestion.values.length, 0);
+      c[Congestion.free.index] = free;
+      c[Congestion.slow.index] = slow;
+      c[Congestion.heavy.index] = heavy;
+      c[Congestion.jam.index] = jam;
+      return c;
+    }
+
+    expect(dominantCongestion(counts()), Congestion.unknown);
+    expect(dominantCongestion(counts(free: 9, slow: 1)), Congestion.free);
+    expect(dominantCongestion(counts(free: 6, heavy: 3)), Congestion.heavy);
+    expect(dominantCongestion(counts(slow: 5, jam: 5)), Congestion.jam);
+    expect(dominantCongestion(counts(slow: 7, heavy: 2)), Congestion.slow);
+  });
+
   test('red roads slow the route by the heavy factor', () async {
     final sampler = TrafficSampler((x, y, z) async => solid(230, 60, 50));
     final e = await sampler.estimate(shape, segments);

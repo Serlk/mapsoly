@@ -4,6 +4,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../../offline/offline_map.dart';
 import '../../traffic/traffic.dart';
+import '../../traffic/traffic_sampler.dart';
 
 /// Everything the map should show, independent of the rendering engine.
 ///
@@ -21,6 +22,7 @@ class MapScene {
     this.traffic,
     this.route,
     this.alternatives = const [],
+    this.routeTraffic = const [],
     this.from,
     this.to,
     this.picked,
@@ -64,6 +66,10 @@ class MapScene {
   /// Selected route line and the other alternatives (drawn muted, below).
   final List<LatLng>? route;
   final List<List<LatLng>> alternatives;
+
+  /// Traffic along [route] (indexes into it): the line is coloured by it,
+  /// inside a band of the route colour so it still reads as the route.
+  final List<TrafficSpan> routeTraffic;
 
   /// Route endpoints and the point picked by a long press or a search.
   final LatLng? from, to, picked;

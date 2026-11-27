@@ -83,6 +83,7 @@ class RouteController extends ChangeNotifier {
   /// data), used to re-estimate travel times of driving routes.
   TrafficSampler? Function()? trafficSampler;
   List<Duration?> _trafficTimes = const [];
+  List<List<TrafficSpan>> _trafficSpans = const [];
 
   /// Installed pack's places database: the source of speed cameras.
   PlacesDatabase? places;
@@ -268,6 +269,11 @@ class RouteController extends ChangeNotifier {
   /// not been estimated (no traffic data, or not a driving route).
   Duration? trafficTime(int index) =>
       index < _trafficTimes.length ? _trafficTimes[index] : null;
+
+  /// Traffic along the selected route, for colouring its line; empty when
+  /// not known. The same list object until the estimate changes.
+  List<TrafficSpan> get trafficSpans =>
+      _selected < _trafficSpans.length ? _trafficSpans[_selected] : const [];
 
   /// Best available travel time of route [index].
   Duration timeOf(int index) => trafficTime(index) ?? _routes[index].duration;
@@ -618,6 +624,7 @@ class RouteController extends ChangeNotifier {
     _step = 0;
     _routes = const [];
     _trafficTimes = const [];
+    _trafficSpans = const [];
     _selected = 0;
     _loading = false;
     _error = null;
@@ -662,6 +669,7 @@ class RouteController extends ChangeNotifier {
     _step = 0;
     _routes = const [];
     _trafficTimes = const [];
+    _trafficSpans = const [];
     _selected = 0;
     _error = null;
     _errorStop = null;
@@ -713,6 +721,7 @@ class RouteController extends ChangeNotifier {
     _loading = false;
     _routes = routes;
     _trafficTimes = const [];
+    _trafficSpans = const [];
     _error = error;
     _errorStop = errorStop;
     // After leaving the route, guidance continues on the new one.
@@ -811,6 +820,7 @@ class RouteController extends ChangeNotifier {
     final client = debugClient ?? _backend?.client;
     if (sampler == null || client == null) return;
     final times = <Duration?>[];
+    final spans = <List<TrafficSpan>>[];
     for (final route in routes) {
       try {
         // All legs of the route, with shape indexes into the joined shape.
@@ -831,6 +841,7 @@ class RouteController extends ChangeNotifier {
         );
         // Turn and wait costs outside the edges stay as routed.
         final rest = route.timeSeconds - freeFlow;
+        spans.add(estimate.spans);
         times.add(
           estimate.coverage < 0.2
               ? null
@@ -842,9 +853,12 @@ class RouteController extends ChangeNotifier {
         debugPrint('Traffic estimate failed: $e');
         times.add(null);
       }
+      // One entry per route, also for a failed one.
+      if (spans.length < times.length) spans.add(const []);
       if (_disposed || request != _request) return;
     }
     _trafficTimes = times;
+    _trafficSpans = spans;
     var best = 0;
     for (var i = 1; i < routes.length; i++) {
       if (timeOf(i) < timeOf(best)) best = i;
@@ -862,6 +876,7 @@ class RouteController extends ChangeNotifier {
     required LatLng to,
     List<RouteStop>? stops,
     List<Duration?> trafficTimes = const [],
+    List<List<TrafficSpan>> trafficSpans = const [],
     bool loading = false,
     String? error,
     int? errorStop,
@@ -870,6 +885,7 @@ class RouteController extends ChangeNotifier {
     _needStart = false;
     _routes = routes;
     _trafficTimes = trafficTimes;
+    _trafficSpans = trafficSpans;
     _selected = 0;
     _loading = loading;
     _error = error;

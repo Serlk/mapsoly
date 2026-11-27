@@ -76,8 +76,56 @@ class TrafficSegment {
   final double freeFlowSeconds;
 }
 
+/// A stretch of a route with one traffic level: shape points
+/// [beginIndex]..[endIndex].
+class TrafficSpan {
+  const TrafficSpan(this.beginIndex, this.endIndex, this.level);
+
+  final int beginIndex, endIndex;
+  final Congestion level;
+
+  @override
+  bool operator ==(Object other) =>
+      other is TrafficSpan &&
+      other.beginIndex == beginIndex &&
+      other.endIndex == endIndex &&
+      other.level == level;
+
+  @override
+  int get hashCode => Object.hash(beginIndex, endIndex, level);
+
+  @override
+  String toString() => 'TrafficSpan($beginIndex..$endIndex ${level.name})';
+}
+
+/// The level that describes a segment whose samples were [counts] (by
+/// [Congestion.index]): the worst one seen on a third of the known
+/// samples or more — a jam on part of a block is what the driver meets —
+/// else the most common one.
+Congestion dominantCongestion(List<int> counts) {
+  var known = 0;
+  for (final c in Congestion.values) {
+    if (c != Congestion.unknown) known += counts[c.index];
+  }
+  if (known == 0) return Congestion.unknown;
+  for (final c in const [Congestion.jam, Congestion.heavy, Congestion.slow]) {
+    if (counts[c.index] * 3 >= known) return c;
+  }
+  var best = Congestion.free;
+  for (final c in Congestion.values) {
+    if (c != Congestion.unknown && counts[c.index] > counts[best.index]) {
+      best = c;
+    }
+  }
+  return best;
+}
+
 class TrafficEstimate {
-  const TrafficEstimate(this.seconds, this.coverage);
+  const TrafficEstimate(this.seconds, this.coverage, [this.spans = const []]);
+
+  /// Traffic along the route, neighbouring segments of one level joined;
+  /// stretches without data are left out.
+  final List<TrafficSpan> spans;
 
   /// Travel time over the given segments with traffic.
   final double seconds;
@@ -127,11 +175,13 @@ class TrafficSampler {
   ) async {
     var seconds = 0.0;
     var samples = 0, known = 0;
+    final spans = <TrafficSpan>[];
     for (final s in segments) {
       final end = math.min(s.endIndex, shape.length - 1);
       // Mean slowdown over the points sampled along this segment.
       var slowdown = 0.0;
       var count = 0;
+      final counts = List<int>.filled(Congestion.values.length, 0);
       var carried = stepMeters / 2;
       for (var i = s.beginIndex; i < end; i++) {
         final a = shape[i], b = shape[i + 1];
@@ -147,6 +197,7 @@ class TrafficSampler {
           final c = await _sample(p, bearing);
           slowdown += 1 / congestionSpeedFactor[c]!;
           count++;
+          counts[c.index]++;
           samples++;
           if (c != Congestion.unknown) known++;
           carried += stepMeters;
@@ -154,7 +205,18 @@ class TrafficSampler {
         carried -= length;
       }
       seconds += s.freeFlowSeconds * (count == 0 ? 1 : slowdown / count);
+      final level = dominantCongestion(counts);
+      if (level != Congestion.unknown && end > s.beginIndex) {
+        final last = spans.isEmpty ? null : spans.last;
+        if (last != null &&
+            last.level == level &&
+            last.endIndex == s.beginIndex) {
+          spans[spans.length - 1] = TrafficSpan(last.beginIndex, end, level);
+        } else {
+          spans.add(TrafficSpan(s.beginIndex, end, level));
+        }
+      }
     }
-    return TrafficEstimate(seconds, samples == 0 ? 0 : known / samples);
+    return TrafficEstimate(seconds, samples == 0 ? 0 : known / samples, spans);
   }
 }

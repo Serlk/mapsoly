@@ -56,6 +56,14 @@ Map<String, Object> _geoJsonSource() => {
   'data': _emptyCollection,
 };
 
+/// Traffic colours on the route line, by [Congestion] name.
+const routeTrafficColors = {
+  'free': '#3ad17a',
+  'slow': '#ffc83d',
+  'heavy': '#f0503a',
+  'jam': '#8e1b1b',
+};
+
 /// Route lines; they are inserted below the labels.
 List<Map<String, Object>> routeLayers(OverlayColors c) {
   Map<String, Object> line(
@@ -79,8 +87,35 @@ List<Map<String, Object>> routeLayers(OverlayColors c) {
   return [
     line(MapIds.firstOverlayLayer, 'alt', c.surface, 7),
     line('mapsoly-alt', 'alt', c.outline, 5, 0.8),
-    line('mapsoly-route-casing', 'route', c.surface, 10),
-    line('mapsoly-route', 'route', c.primary, 6),
+    // The route is a band of the accent colour with a light edge. Where
+    // traffic is known its colour runs down the middle, so the line shows
+    // the jams and still reads as the route; elsewhere the band is plain.
+    line('mapsoly-route-casing', 'route', c.surface, 13),
+    line('mapsoly-route', 'route', c.primary, 10),
+    {
+      'id': 'mapsoly-route-traffic',
+      'type': 'line',
+      'source': MapIds.routes,
+      'filter': ['==', 'kind', 'traffic'],
+      // Butt ends: spans meet without one colour's cap covering the next.
+      'layout': {'line-cap': 'butt', 'line-join': 'round'},
+      'paint': {
+        'line-color': [
+          'match',
+          ['get', 'level'],
+          'free',
+          routeTrafficColors['free']!,
+          'slow',
+          routeTrafficColors['slow']!,
+          'heavy',
+          routeTrafficColors['heavy']!,
+          'jam',
+          routeTrafficColors['jam']!,
+          c.primary,
+        ],
+        'line-width': 5,
+      },
+    },
   ];
 }
 

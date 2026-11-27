@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -27,6 +28,20 @@ import 'fake_routing.dart';
 /// The whole main screen with a stand-in for the map: what lies on the map
 /// in each state, the camera modes, picking a point, and "back" stepping
 /// out of everything one level at a time.
+class FakeCompass implements CompassSource {
+  final controller = StreamController<double>.broadcast();
+  bool started = false;
+
+  @override
+  Stream<double> get headings => controller.stream;
+
+  @override
+  Future<void> start() async => started = true;
+
+  @override
+  Future<void> stop() async => started = false;
+}
+
 void main() {
   setUpAll(loadShotFonts);
 
@@ -49,6 +64,7 @@ void main() {
     Brightness brightness = Brightness.light,
     double maxPitch = 60,
     Size size = const Size(720, 686),
+    CompassSource? compass,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -94,6 +110,7 @@ void main() {
               engine: engine,
               route: route,
               files: DesktopFileExchange(home: home),
+              compass: compass,
             ),
           ),
         ),
@@ -213,6 +230,9 @@ void main() {
       80,
       scrollable: find.byType(Scrollable).last,
     );
+    // Clear of the bottom bar before tapping.
+    await tester.ensureVisible(find.text('Где ничего не записывать'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Где ничего не записывать'));
     await tester.pumpAndSettle();
     expect(find.text('Добавить зону'), findsOneWidget);
@@ -447,6 +467,29 @@ void main() {
     expect(map.center.latitude, closeTo(admiralty.latitude, 1e-4));
     expect(user.searches.ranked.map((p) => p.count), [2, 2]);
     expect(user.searches.ranked.first.label, 'Адмиралтейство');
+  });
+
+  testWidgets('the compass button turns the map with the device', (
+    tester,
+  ) async {
+    final compass = FakeCompass();
+    await start(tester, compass: compass);
+    // No position needed: the button is there because there is a compass.
+    await tester.tap(find.byTooltip('Поворачивать карту по компасу'));
+    await tester.pumpAndSettle();
+    expect(compass.started, isTrue);
+    compass.controller.add(90);
+    await tester.pumpAndSettle();
+    expect(map.bearing, closeTo(90, 1));
+    await shot(tester, 'map_compass_mode');
+    // Again: north-up, and the compass is released.
+    await tester.tap(find.byTooltip('Карта по компасу: выключить'));
+    await tester.pumpAndSettle();
+    expect(map.bearing, 0);
+    expect(compass.started, isFalse);
+    compass.controller.add(180);
+    await tester.pumpAndSettle();
+    expect(map.bearing, 0);
   });
 
   testWidgets('moving without a route: 3D and no controls, unless off', (

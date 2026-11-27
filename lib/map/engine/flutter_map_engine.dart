@@ -7,6 +7,7 @@ import 'package:vector_map_tiles/vector_map_tiles.dart';
 
 import '../../offline/pmtiles_tile_provider.dart';
 import '../../traffic/traffic.dart';
+import '../../traffic/traffic_sampler.dart';
 import '../../traffic/yandex_tile_provider.dart';
 import 'map_engine.dart';
 
@@ -250,11 +251,28 @@ class FlutterMapView extends StatelessWidget {
               ),
             Polyline(
               points: route,
-              strokeWidth: 6,
+              strokeWidth: 10,
               color: colors.primary,
-              borderStrokeWidth: 2,
+              borderStrokeWidth: 1.5,
               borderColor: colors.surface,
             ),
+            // Traffic down the middle of the route band.
+            for (final span in scene.routeTraffic)
+              if (span.beginIndex >= 0 &&
+                  span.endIndex < route.length &&
+                  span.endIndex > span.beginIndex)
+                Polyline(
+                  points: route.sublist(span.beginIndex, span.endIndex + 1),
+                  strokeWidth: 5,
+                  strokeCap: StrokeCap.butt,
+                  color: switch (span.level) {
+                    Congestion.free => const Color(0xFF3AD17A),
+                    Congestion.slow => const Color(0xFFFFC83D),
+                    Congestion.heavy => const Color(0xFFF0503A),
+                    Congestion.jam => const Color(0xFF8E1B1B),
+                    Congestion.unknown => colors.primary,
+                  },
+                ),
           ],
         ),
       MarkerLayer(

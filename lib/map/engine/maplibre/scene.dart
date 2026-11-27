@@ -1,3 +1,4 @@
+import '../../../traffic/traffic_sampler.dart';
 import 'dart:convert';
 
 import 'package:latlong2/latlong.dart';
@@ -72,20 +73,36 @@ String _collection(List<Map<String, Object>> features) =>
     jsonEncode({'type': 'FeatureCollection', 'features': features});
 
 /// The selected route and its alternatives as line features.
-String routesGeoJson(List<LatLng>? route, List<List<LatLng>> alternatives) {
-  Map<String, Object> line(List<LatLng> shape, String kind) => {
-    'type': 'Feature',
-    'properties': {'kind': kind},
-    'geometry': {
-      'type': 'LineString',
-      'coordinates': [for (final p in shape) _lonLat(p)],
-    },
-  };
+String routesGeoJson(
+  List<LatLng>? route,
+  List<List<LatLng>> alternatives, [
+  List<TrafficSpan> traffic = const [],
+]) {
+  Map<String, Object> line(List<LatLng> shape, String kind, [String? level]) =>
+      {
+        'type': 'Feature',
+        'properties': {'kind': kind, 'level': ?level},
+        'geometry': {
+          'type': 'LineString',
+          'coordinates': [for (final p in shape) _lonLat(p)],
+        },
+      };
   if (route == null) return SceneState.emptyGeoJson;
   return _collection([
     for (final other in alternatives)
       if (other.length > 1) line(other, 'alt'),
     if (route.length > 1) line(route, 'route'),
+    // The traffic along the route, drawn inside its band.
+    if (route.length > 1)
+      for (final span in traffic)
+        if (span.beginIndex >= 0 &&
+            span.endIndex < route.length &&
+            span.endIndex > span.beginIndex)
+          line(
+            route.sublist(span.beginIndex, span.endIndex + 1),
+            'traffic',
+            span.level.name,
+          ),
   ]);
 }
 

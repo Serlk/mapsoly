@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:mapsoly/traffic/traffic_sampler.dart';
 import 'package:mapsoly/map/engine/maplibre/scene.dart';
 import 'package:mapsoly/map/engine/maplibre/style.dart';
 
@@ -54,6 +55,26 @@ void main() {
         points: pointsGeoJson(position: a),
       );
       expect(diffScene(s, same), isEmpty);
+    });
+
+    test('traffic along the route becomes coloured pieces of its line', () {
+      final plain = routesGeoJson([a, b, c], []);
+      final coloured = routesGeoJson(
+        [a, b, c],
+        [],
+        const [
+          TrafficSpan(0, 1, Congestion.free),
+          TrafficSpan(1, 2, Congestion.jam),
+          TrafficSpan(2, 9, Congestion.slow), // beyond the shape: ignored
+        ],
+      );
+      expect(plain, isNot(contains('traffic')));
+      expect('"kind":"traffic"'.allMatches(coloured), hasLength(2));
+      expect(coloured, contains('"level":"free"'));
+      expect(coloured, contains('"level":"jam"'));
+      expect(coloured, isNot(contains('"level":"slow"')));
+      // The route itself is still there, under the colours.
+      expect(coloured, contains('"kind":"route"'));
     });
 
     test('a moving position touches only the points and the circle', () {

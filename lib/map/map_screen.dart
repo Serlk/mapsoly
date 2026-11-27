@@ -17,6 +17,7 @@ import '../places/places_database.dart';
 import '../places/search_panel.dart';
 import '../positioning/positioning.dart';
 import '../settings.dart';
+import '../sensors_screen.dart';
 import '../settings_screen.dart';
 import '../traffic/traffic.dart';
 import '../user/file_exchange.dart';
@@ -163,6 +164,8 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   Timer? _chromeTimer;
   Offset? _pointerDownAt;
   bool _cruising = false;
+  bool _compassMode = false;
+  bool _hasCompass = false;
 
   // Map downloads: they go on while the "Maps" screen is closed.
   PackDownloads? _downloads;
@@ -343,11 +346,13 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     _traffic.addListener(() => widget.settings.traffic = _traffic.source);
     _route.addListener(_onRouteChanged);
     _speedLimit.addListener(_rebuild);
+    _findCompass();
     _route.trafficSampler = _traffic.sampler;
     _glass.addListener(_rebuild);
     _map.cameraChanges.addListener(_onCameraMoved);
     _startPositioning();
     widget.settings.addListener(_applyLocationSettings);
+    widget.settings.addListener(_applySensorSettings);
     _loadOffline();
   }
 
@@ -441,6 +446,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     _downloads?.dispose();
     _pick?.completer.complete(null);
     widget.settings.removeListener(_applyLocationSettings);
+    widget.settings.removeListener(_applySensorSettings);
     _map.cameraChanges.removeListener(_onCameraMoved);
     _compassSub?.cancel();
     _compass?.stop();
@@ -528,13 +534,50 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   }
 
   /// North-up again; the tilt stays as it is.
+  /// The map turns with the device, by its compass; works without a
+  /// position. Switched by the compass button while the map is north-up.
+  void _setCompassMode(bool on) {
+    if (on == _compassMode) return;
+    setState(() => _compassMode = on);
+    if (on) {
+      _heading.reset();
+      _startCompass();
+    } else if (_locationMode != LocationMode.heading) {
+      _stopCompass();
+    }
+  }
+
+  void _followCompass() {
+    final heading = _compassHeading;
+    if (!_compassMode ||
+        heading == null ||
+        _driving ||
+        _cruising ||
+        _locationMode == LocationMode.heading ||
+        !_map.ready) {
+      return;
+    }
+    _map.moveCamera(bearing: _heading.update(heading));
+  }
+
   void _northUp() {
+    if (_compassMode) {
+      _setCompassMode(false);
+      _map.moveCamera(bearing: 0);
+      return;
+    }
     if (_locationMode == LocationMode.heading) {
       _setLocationMode(LocationMode.centered);
     } else if (_driving && widget.settings.drive3d && _follow.following) {
       // The driving camera would turn it straight back.
       widget.settings.drive3d = false;
       _onRouteChanged();
+    } else if (_hasCompass &&
+        !_driving &&
+        _map.ready &&
+        angleDelta(0, _map.bearing).abs() <= 0.5) {
+      // Already north-up: the button turns the compass on instead.
+      _setCompassMode(true);
     } else {
       _map.moveCamera(bearing: 0);
     }
@@ -548,9 +591,55 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
       _heading.reset();
       _startCompass();
     } else if (wasHeading) {
-      _stopCompass();
+      if (!_compassMode) _stopCompass();
       if (mode == LocationMode.centered) _map.moveCamera(bearing: 0);
     }
+  }
+
+  /// Looks for a compass, so the button that follows it can be offered.
+  Future<void> _findCompass() async {
+    final hooked = widget.testHooks?.compass;
+    if (hooked != null) {
+      _compass = hooked;
+      _hasCompass = true;
+      return;
+    }
+    if (widget.testHooks != null || !Platform.isLinux) return;
+    final key = _compassKey = _compassSettingsKey;
+    try {
+      final compass = compassFor(widget.settings);
+      final found = await compass.available();
+      if (!mounted || key != _compassKey) {
+        unawaited(compass.dispose());
+        return;
+      }
+      _compass = found ? compass : null;
+      if (!found) unawaited(compass.dispose());
+      setState(() => _hasCompass = found);
+    } on Object catch (e) {
+      debugPrint('Compass not found: $e');
+    }
+  }
+
+  String get _compassSettingsKey {
+    final s = widget.settings;
+    return '${s.compass.name}|${s.magnetSensor}|${s.accelSensor}';
+  }
+
+  String? _compassKey;
+
+  /// The choice of sensors changed in the settings: drop the old compass
+  /// and look again.
+  void _applySensorSettings() {
+    if (widget.testHooks != null || _compassKey == _compassSettingsKey) return;
+    final wasFollowing = _compassMode || _locationMode == LocationMode.heading;
+    _stopCompass();
+    final old = _compass;
+    _compass = null;
+    if (old is DeviceCompass) unawaited(old.dispose());
+    _findCompass().then((_) {
+      if (mounted && wasFollowing && _compass != null) _startCompass();
+    });
   }
 
   void _startCompass() {
@@ -558,12 +647,13 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
       final compass = _compass ??=
           widget.testHooks?.compass ??
           (widget.testHooks == null && Platform.isLinux
-              ? SensorProxyCompass()
+              ? compassFor(widget.settings)
               : null);
       if (compass == null) return;
       _compassSub ??= compass.headings.listen((h) {
         _compassHeading = h;
         _followPosition();
+        _followCompass();
       });
       unawaited(
         compass.start().catchError((Object e) {
@@ -663,8 +753,9 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     if (driving) {
       _follow.resume();
       _driveCamera.reset();
-      if (_locationMode != LocationMode.free) {
+      if (_locationMode != LocationMode.free || _compassMode) {
         _locationMode = LocationMode.free;
+        _compassMode = false;
         _stopCompass();
       }
       _applyDrivePadding();
@@ -718,6 +809,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
           ? null
           : TrafficOverlay(_traffic.source, version, _traffic.client),
       route: routes.isEmpty ? null : routes[selected].shape,
+      routeTraffic: _route.trafficSpans,
       alternatives: [
         for (var i = 0; i < routes.length; i++)
           if (i != selected) routes[i].shape,
@@ -1164,6 +1256,8 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
                 onZoom: _zoom,
                 onToggle3d: _toggle3d,
                 onNorthUp: _northUp,
+                hasCompass: _hasCompass,
+                compassMode: _compassMode,
                 onLocation: _onLocationButton,
                 onLocationDetails: _showLocation,
                 hasFix: status?.estimate != null,
@@ -1573,6 +1667,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
                               positioning: _positioning,
                               obd: _obd,
                               onOpenPacks: _showPacks,
+                              showSensors: hooks == null && Platform.isLinux,
                               user: widget.user,
                               services: this,
                               files: _files,
@@ -1802,6 +1897,8 @@ class MapButtons extends StatelessWidget {
     required this.mode,
     required this.tilted,
     this.privateArea = false,
+    this.hasCompass = false,
+    this.compassMode = false,
   });
 
   final MapViewController camera;
@@ -1809,6 +1906,13 @@ class MapButtons extends StatelessWidget {
   final VoidCallback onToggle3d, onNorthUp, onLocation, onLocationDetails;
   final bool hasFix;
   final LocationMode mode;
+
+  /// The device has a compass: the compass button is always there and,
+  /// with the map north-up, turns [compassMode] on.
+  final bool hasCompass;
+
+  /// The map is turning with the device.
+  final bool compassMode;
 
   /// Whether the 3D view is on (the button looks pressed).
   final bool tilted;
@@ -1911,7 +2015,8 @@ class MapButtons extends StatelessWidget {
             final bearing = camera.ready ? camera.bearing : 0.0;
             final pitch = camera.ready ? camera.pitch : 0.0;
             final turned = angleDelta(0, bearing).abs() > 0.5;
-            final shown = turned || pitch > 1;
+            final shown = turned || pitch > 1 || hasCompass;
+            final offer = hasCompass && !turned && !compassMode;
             return Padding(
               padding: const EdgeInsets.only(top: Ui.gap),
               child: SizedBox(
@@ -1925,15 +2030,27 @@ class MapButtons extends StatelessWidget {
                           radius: 28,
                           blur: false,
                           child: button(
-                            'Повернуть севером вверх',
-                            Transform.rotate(
-                              angle: -bearing * math.pi / 180,
-                              child: Icon(
-                                Icons.navigation,
-                                color: turned ? colors.primary : colors.outline,
-                              ),
-                            ),
+                            compassMode
+                                ? 'Карта по компасу: выключить'
+                                : offer
+                                ? 'Поворачивать карту по компасу'
+                                : 'Повернуть севером вверх',
+                            offer
+                                ? Icon(
+                                    Icons.explore_outlined,
+                                    color: colors.onSurfaceVariant,
+                                  )
+                                : Transform.rotate(
+                                    angle: -bearing * math.pi / 180,
+                                    child: Icon(
+                                      Icons.navigation,
+                                      color: turned || compassMode
+                                          ? colors.primary
+                                          : colors.outline,
+                                    ),
+                                  ),
                             onNorthUp,
+                            active: compassMode,
                           ),
                         ),
                 ),

@@ -6,6 +6,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'obd/obd_service.dart';
+import 'positioning/sources/linux_compass.dart';
 import 'traffic/traffic.dart';
 
 /// Map server used unless the user enters another one in the settings.
@@ -42,6 +43,8 @@ class AppSettings extends ChangeNotifier {
   double? _zoom;
   bool _drive3d = true;
   bool _speedSound = true;
+  CompassChoice _compass = CompassChoice.auto;
+  String? _magnetSensor, _accelSensor;
   bool _tilted = false;
 
   /// Whether the camera tilts and turns along the route during guidance
@@ -60,6 +63,31 @@ class AppSettings extends ChangeNotifier {
   set speedSound(bool value) {
     if (value == _speedSound) return;
     _speedSound = value;
+    _changed();
+  }
+
+  /// Which compass to use (Linux): chosen by hand when the automatic pick
+  /// is wrong or finds nothing.
+  CompassChoice get compass => _compass;
+
+  /// IIO names of the magnetometer and accelerometer for the raw compass;
+  /// null lets the app take the first of each.
+  String? get magnetSensor => _magnetSensor;
+  String? get accelSensor => _accelSensor;
+
+  void setCompass({
+    required CompassChoice choice,
+    required String? magnet,
+    required String? accel,
+  }) {
+    if (choice == _compass &&
+        magnet == _magnetSensor &&
+        accel == _accelSensor) {
+      return;
+    }
+    _compass = choice;
+    _magnetSensor = magnet;
+    _accelSensor = accel;
     _changed();
   }
 
@@ -156,6 +184,9 @@ class AppSettings extends ChangeNotifier {
         settings._wardriving = json['wardriving'] == true;
         settings._drive3d = json['drive3d'] != false;
         settings._speedSound = json['speedSound'] != false;
+        settings._compass = _byName(CompassChoice.values, json['compass']);
+        settings._magnetSensor = json['magnetSensor'] as String?;
+        settings._accelSensor = json['accelSensor'] as String?;
         settings._tilted = json['tilted'] == true;
         final obd = json['obd'];
         if (obd is Map<String, dynamic>) {
@@ -199,6 +230,9 @@ class AppSettings extends ChangeNotifier {
             'wardriving': _wardriving,
             'drive3d': _drive3d,
             'speedSound': _speedSound,
+            'compass': _compass.name,
+            if (_magnetSensor != null) 'magnetSensor': _magnetSensor,
+            if (_accelSensor != null) 'accelSensor': _accelSensor,
             'tilted': _tilted,
             if (_catalogUrl != null) 'catalogUrl': _catalogUrl,
             'obd': _obd.toJson(),
