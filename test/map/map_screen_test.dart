@@ -438,6 +438,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(map.pitch, tiltedPitch);
     expect(find.byType(MapButtons), findsNothing);
+    expect(
+      tester.getTopLeft(find.byType(NavigationBar)).dy,
+      greaterThanOrEqualTo(686),
+    );
     expect(find.byType(Speedometer), findsOneWidget);
     await shot(tester, 'map_cruising');
 

@@ -220,7 +220,10 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   /// Once per position update: is the car moving, and on what road.
   void _trackDriving() {
     final speed = _speedKmh;
+    final wasHidden = _chromeHidden;
     _chrome.update(speed, DateTime.now());
+    // The bottom bar is not rebuilt with the route, so say it out loud.
+    if (_chromeHidden != wasHidden) _rebuild();
     final progress = _route.progress;
     // Moving without a route: the map still goes 3D, unless switched off.
     final cruising = _chrome.moving && progress == null;
