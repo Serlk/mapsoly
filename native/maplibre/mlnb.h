@@ -2,6 +2,10 @@
 // placed below a parent wl_surface (the GTK/Flutter window, which must be transparent
 // where the map should show). Used from Dart through dart:ffi; see docs/map-engine.md.
 //
+// On Android the map is drawn into an ANativeWindow instead (the producer side of a
+// Flutter texture): the mlnb_android_* functions at the end replace mlnb_create and
+// mlnb_set_geometry there; everything else is the same on both platforms.
+//
 // Threading: every function may be called from any thread. Calls are posted to the map's
 // own thread and return immediately, except mlnb_create (waits until the map thread is
 // up) and mlnb_destroy (waits until it is gone; no callback is delivered afterwards).
@@ -72,6 +76,27 @@ MLNB_API void mlnb_frame_log(mlnb_map*, const char* csv_path);
 MLNB_API void mlnb_snapshot(mlnb_map*, const char* ppm_path);
 // Scripted camera run of the spike; writes <prefix>.frames.csv, then MLNB_EVENT_BENCH_DONE.
 MLNB_API void mlnb_bench_start(mlnb_map*, const char* out_prefix);
+
+#ifdef __ANDROID__
+// ---- Android only (not part of the library on Linux) --------------------------------
+// Windows are ANativeWindow pointers. Only pointers announced with
+// mlnb_android_register_window and not yet taken back are ever used; any other value is
+// treated as "no window", so a stale pointer is harmless. The library takes references
+// of its own; the caller keeps and releases its own.
+MLNB_API void mlnb_android_register_window(void* native_window);
+// The window is about to go away: maps drawing into it are taken off it. Returns when
+// none of them touches it any more.
+MLNB_API void mlnb_android_unregister_window(void* native_window);
+
+// width_px, height_px: size of the window's buffers in device pixels. pixel_ratio:
+// device pixels per logical pixel (any positive number), fixed for the lifetime of the
+// map; camera padding and the map's own size are in logical pixels as elsewhere.
+// native_window may be NULL: the map exists but draws nothing until it gets one.
+MLNB_API mlnb_map* mlnb_android_create(void* native_window, int32_t width_px, int32_t height_px, double pixel_ratio,
+                                       const char* cache_path, mlnb_event_cb cb);
+// Another window (after a resize, or when the app is back on screen), or NULL.
+MLNB_API void mlnb_android_set_surface(mlnb_map*, void* native_window, int32_t width_px, int32_t height_px);
+#endif
 
 #ifdef __cplusplus
 }

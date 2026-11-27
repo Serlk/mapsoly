@@ -3,33 +3,44 @@ import 'dart:io';
 import 'package:flutter/widgets.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../../platform/android_properties.dart';
 import 'flutter_map_engine.dart';
 import 'map_engine.dart';
 import 'maplibre_engine.dart';
 
 /// The one place that decides which rendering engine draws the map.
 ///
-/// MapLibre Native where it can run (Linux on Wayland, with the bridge
-/// library and the map assets in the bundle), the Flutter tile renderer
-/// everywhere else. `MAPSOLY_MAP_ENGINE=flutter|maplibre` overrides the
-/// choice for testing; `maplibre` still falls back when it cannot work.
+/// MapLibre Native where it can run (Linux on Wayland with the bridge
+/// library and the map assets in the bundle; Android with the bridge library
+/// in the APK), the Flutter tile renderer everywhere else.
+/// `MAPSOLY_MAP_ENGINE=flutter|maplibre` overrides the choice for testing
+/// (on Android: `adb shell setprop debug.mapsoly.map_engine flutter`, read
+/// when the app starts); `maplibre` still falls back when it cannot work.
 MapViewController createMapController() =>
     _useMapLibre ? MapLibreViewController() : FlutterMapViewController();
+
+/// Android's stand-in for the `MAPSOLY_MAP_ENGINE` environment variable.
+const androidEngineProperty = 'debug.mapsoly.map_engine';
 
 final bool _useMapLibre = _decide();
 
 bool _decide() {
-  final forced = Platform.environment['MAPSOLY_MAP_ENGINE'];
+  final forced = Platform.isAndroid
+      ? androidSystemProperty(androidEngineProperty)
+      : Platform.environment['MAPSOLY_MAP_ENGINE'];
   if (forced == 'flutter') {
-    stderr.writeln('map engine: Flutter (MAPSOLY_MAP_ENGINE=flutter)');
+    mapEngineLog(
+      'map engine: Flutter '
+      '(${Platform.isAndroid ? androidEngineProperty : 'MAPSOLY_MAP_ENGINE'}=flutter)',
+    );
     return false;
   }
   final reason = MapLibreEngine.unavailableReason();
   if (reason != null) {
-    stderr.writeln('map engine: Flutter ($reason)');
+    mapEngineLog('map engine: Flutter ($reason)');
     return false;
   }
-  stderr.writeln('map engine: MapLibre Native');
+  mapEngineLog('map engine: MapLibre Native');
   return true;
 }
 

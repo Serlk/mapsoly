@@ -21,12 +21,15 @@ import io.flutter.plugin.common.MethodChannel
  *    only `keepAwake` exists here.
  *  - `mapsoly/android`: permissions, folders, the alert sound, Bluetooth.
  *  - `mapsoly/android/location`, `/compass`, `/bluetooth`: event streams.
+ *  - `mapsoly/map_surface`: the texture the MapLibre map engine draws into
+ *    (MapSurface.kt).
  */
 class MainActivity : FlutterActivity() {
     private lateinit var permissions: Permissions
     private var location: LocationBridge? = null
     private var compass: CompassBridge? = null
     private var bluetooth: BluetoothBridge? = null
+    private var mapSurface: MapSurface? = null
     private val sound = AlertPlayer()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -45,6 +48,7 @@ class MainActivity : FlutterActivity() {
         location = LocationBridge(this, messenger)
         compass = CompassBridge(this, messenger)
         val bt = BluetoothBridge(this, messenger).also { bluetooth = it }
+        mapSurface = MapSurface(applicationContext, flutterEngine.renderer, messenger)
 
         MethodChannel(messenger, "mapsoly/native_view").setMethodCallHandler { call, result ->
             when (call.method) {
@@ -113,6 +117,8 @@ class MainActivity : FlutterActivity() {
         location?.stop()
         compass?.stop()
         bluetooth?.closeAll()
+        mapSurface?.release()
+        mapSurface = null
         sound.release()
         super.cleanUpFlutterEngine(flutterEngine)
     }

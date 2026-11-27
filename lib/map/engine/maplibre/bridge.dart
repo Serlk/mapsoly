@@ -9,7 +9,8 @@ import 'dart:typed_data';
 /// except [create] and [destroy].
 class MapLibreBridge {
   MapLibreBridge._(DynamicLibrary lib)
-    : _create = lib.lookupFunction<_CreateC, _CreateD>('mlnb_create'),
+    : _lib = lib,
+      _create = lib.lookupFunction<_CreateC, _CreateD>('mlnb_create'),
       _destroy = lib.lookupFunction<_PtrC, _PtrD>('mlnb_destroy'),
       _setGeometry = lib.lookupFunction<_GeomC, _GeomD>('mlnb_set_geometry'),
       _setVisible = lib.lookupFunction<_IntC, _IntD>('mlnb_set_visible'),
@@ -33,9 +34,11 @@ class MapLibreBridge {
   static const eventBenchDone = 3;
   static const eventMapFailed = 4;
 
-  /// The bridge library sits next to the executable's other libraries.
-  static String get libraryPath =>
-      '${File(Platform.resolvedExecutable).parent.path}/lib/libmapsoly_mln.so';
+  /// The bridge library sits next to the executable's other libraries. On
+  /// Android it is one of the app's native libraries, found by name.
+  static String get libraryPath => Platform.isAndroid
+      ? 'libmapsoly_mln.so'
+      : '${File(Platform.resolvedExecutable).parent.path}/lib/libmapsoly_mln.so';
 
   static MapLibreBridge? _instance;
   static String? _error;
@@ -45,7 +48,7 @@ class MapLibreBridge {
   static MapLibreBridge? load() {
     if (_instance != null || _error != null) return _instance;
     final path = libraryPath;
-    if (!File(path).existsSync()) {
+    if (!Platform.isAndroid && !File(path).existsSync()) {
       _error = 'no $path';
       return null;
     }
@@ -78,6 +81,16 @@ class MapLibreBridge {
         Void Function(Pointer<Void>),
         void Function(Pointer<Void>)
       >('free');
+
+  final DynamicLibrary _lib;
+
+  // Android only (the Linux library does not have them): looked up on first use.
+  late final _androidCreate = _lib
+      .lookupFunction<_AndroidCreateC, _AndroidCreateD>('mlnb_android_create');
+  late final _androidSetSurface = _lib
+      .lookupFunction<_AndroidSurfaceC, _AndroidSurfaceD>(
+        'mlnb_android_set_surface',
+      );
 
   final _CreateD _create;
   final _PtrD _destroy;
@@ -154,6 +167,37 @@ class MapLibreBridge {
     );
     return map == nullptr ? null : map;
   }
+
+  /// Android: creates a map that draws into [window], an `ANativeWindow`
+  /// address from MapSurface.kt (0: none yet, see [androidSetSurface]) whose
+  /// buffers are [widthPx] x [heightPx] device pixels. [pixelRatio]: device
+  /// pixels per logical pixel. Null on failure.
+  Pointer<Void>? androidCreate({
+    required int window,
+    required int widthPx,
+    required int heightPx,
+    required double pixelRatio,
+    required Pointer<NativeFunction<Void Function(Int32, Int64)>> onEvent,
+  }) {
+    final map = _androidCreate(
+      Pointer.fromAddress(window),
+      widthPx,
+      heightPx,
+      pixelRatio,
+      nullptr,
+      onEvent,
+    );
+    return map == nullptr ? null : map;
+  }
+
+  /// Android: the map draws into [window] from now on (0: into nothing). A
+  /// window Android has taken back in the meantime is recognised and ignored.
+  void androidSetSurface(
+    Pointer<Void> map,
+    int window,
+    int widthPx,
+    int heightPx,
+  ) => _androidSetSurface(map, Pointer.fromAddress(window), widthPx, heightPx);
 
   /// Stops the map thread and frees everything; no event arrives afterwards.
   void destroy(Pointer<Void> map) => _destroy(map);
@@ -292,6 +336,28 @@ typedef _CreateD =
       Pointer<Uint8>,
       _EventPtr,
     );
+typedef _AndroidCreateC =
+    Pointer<Void> Function(
+      Pointer<Void>,
+      Int32,
+      Int32,
+      Double,
+      Pointer<Uint8>,
+      _EventPtr,
+    );
+typedef _AndroidCreateD =
+    Pointer<Void> Function(
+      Pointer<Void>,
+      int,
+      int,
+      double,
+      Pointer<Uint8>,
+      _EventPtr,
+    );
+typedef _AndroidSurfaceC =
+    Void Function(Pointer<Void>, Pointer<Void>, Int32, Int32);
+typedef _AndroidSurfaceD =
+    void Function(Pointer<Void>, Pointer<Void>, int, int);
 typedef _PtrC = Void Function(Pointer<Void>);
 typedef _PtrD = void Function(Pointer<Void>);
 typedef _GeomC = Void Function(Pointer<Void>, Int32, Int32, Int32, Int32);

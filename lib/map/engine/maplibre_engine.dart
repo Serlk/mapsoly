@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../../offline/pmtiles.dart';
+import '../../platform/android_properties.dart';
 import 'flutter_map_engine.dart';
 import '../position_arrow.dart';
 import 'map_engine.dart';
@@ -19,32 +20,37 @@ import 'maplibre/camera.dart';
 import 'maplibre/gestures.dart';
 import 'maplibre/scene.dart';
 import 'maplibre/style.dart';
+import 'maplibre/surface.dart';
 import 'maplibre/tile_server.dart';
 
-/// MapLibre Native as the map engine (Linux, Wayland).
+/// MapLibre Native as the map engine (Linux on Wayland, Android).
 ///
-/// The map is not part of Flutter's scene. `libmapsoly_mln.so` draws it into
-/// a Wayland subsurface placed *below* the application window; the window is
-/// transparent and [MapLibreView] punches a hole into whatever Flutter
-/// painted underneath it, so the map shows through while every widget
-/// painted later (cards, buttons, sheets) stays on top. Input never reaches
-/// the subsurface: gestures are ordinary Flutter pointer events, turned into
-/// camera changes here. See docs/map-engine.md.
+/// On Linux the map is not part of Flutter's scene. `libmapsoly_mln.so` draws
+/// it into a Wayland subsurface placed *below* the application window; the
+/// window is transparent and [MapLibreView] punches a hole into whatever
+/// Flutter painted underneath it, so the map shows through while every widget
+/// painted later (cards, buttons, sheets) stays on top. On Android the same
+/// library draws into a Flutter texture, shown by a `Texture` widget. That
+/// difference is all in [MapSurface]. Input never reaches the native map:
+/// gestures are ordinary Flutter pointer events, turned into camera changes
+/// here. See docs/map-engine.md.
 abstract final class MapLibreEngine {
-  /// Offline glyphs and sprites, installed next to the Flutter assets.
-  static String get assetsDirectory =>
-      '${File(Platform.resolvedExecutable).parent.path}/data/maplibre';
-
   /// Why this engine cannot be used in this process, or null when it can.
   /// (A failure to create the map later still falls back, see [MapLibreView].)
   static String? unavailableReason() {
+    if (Platform.isAndroid) {
+      // The glyphs and sprites are unpacked from the APK when the view
+      // starts; if they are missing the view falls back by itself.
+      return MapLibreBridge.load() == null ? MapLibreBridge.loadError : null;
+    }
     if (!Platform.isLinux) return 'not Linux';
     final env = Platform.environment;
     if ((env['WAYLAND_DISPLAY'] ?? '').isEmpty) return 'not a Wayland session';
     if (env['GDK_BACKEND'] == 'x11') return 'GDK_BACKEND=x11';
     if (MapLibreBridge.load() == null) return MapLibreBridge.loadError;
-    if (!Directory('$assetsDirectory/fonts').existsSync()) {
-      return 'no map assets in $assetsDirectory';
+    final assets = WaylandMapSurface.bundleAssetsDirectory;
+    if (!Directory('$assets/fonts').existsSync()) {
+      return 'no map assets in $assets';
     }
     return null;
   }
@@ -215,6 +221,11 @@ class MapLibreViewController implements MapViewController {
   }
 }
 
+/// One line about the engine in the app's log: stderr, and logcat on Android
+/// (where stderr goes nowhere).
+void mapEngineLog(String line) =>
+    Platform.isAndroid ? debugPrint(line) : stderr.writeln(line);
+
 class _CameraChanges extends ChangeNotifier {
   void notify() => notifyListeners();
 }
@@ -277,8 +288,6 @@ class MapLibreView extends StatefulWidget {
 
 class _MapLibreViewState extends State<MapLibreView>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
-  static const _channel = MethodChannel('mapsoly/native_view');
-
   /// Camera changes are reported to the screen at most this often.
   static const _cameraReportInterval = Duration(milliseconds: 250);
 
@@ -286,13 +295,17 @@ class _MapLibreViewState extends State<MapLibreView>
   Pointer<Void>? _map;
   NativeCallable<Void Function(Int32, Int64)>? _events;
   MapTileServer? _tiles;
-  ({int display, int surface, int x, int y})? _handles;
+  final MapSurface _surface = MapSurface.forPlatform();
+  bool _prepared = false;
   bool _creating = false;
   bool _disposed = false;
   String? _failure;
 
-  // Geometry the native map was last given.
+  // Geometry the native map was last given. [_ratio] is the map's pixel
+  // ratio; [_scale] the whole number at or above it, in which the images the
+  // map is given (pins, the position arrow) are drawn.
   Rect? _rect;
+  double _ratio = 0;
   int _scale = 0;
 
   // Scene: what should be shown, what has been sent, what is being loaded.
@@ -369,6 +382,12 @@ class _MapLibreViewState extends State<MapLibreView>
     _prepare();
   }
 
+  /// The map as a widget where it is part of Flutter's scene (Android), null
+  /// where it lies below the window (Wayland). Built once: the surface's
+  /// widget listens for its texture itself.
+  late final Widget? _mapView = _surface.buildView();
+  bool get _inFlutterScene => _mapView != null;
+
   /// Background colours of the bundled styles, read from their `background`
   /// layers; shown in the map's place until the map itself has drawn.
   final Map<String, Color> _styleBackground = {};
@@ -389,18 +408,13 @@ class _MapLibreViewState extends State<MapLibreView>
       await _readStyleBackgrounds();
       final bridge = MapLibreBridge.load();
       if (bridge == null) throw MapLibreBridge.loadError ?? 'no bridge';
-      final h = (await _channel.invokeMapMethod<String, Object?>('handles'))!;
-      if (h['wayland'] != true) throw 'the window is not on Wayland';
+      _surface.onError = _fail;
+      await _surface.prepare();
       final tiles = await MapTileServer.shared();
       if (_disposed) return;
       _bridge = bridge;
       _tiles = tiles;
-      _handles = (
-        display: h['display']! as int,
-        surface: h['surface']! as int,
-        x: h['x']! as int,
-        y: h['y']! as int,
-      );
+      _prepared = true;
       _syncGeometry();
     } catch (e) {
       _fail('$e');
@@ -410,7 +424,7 @@ class _MapLibreViewState extends State<MapLibreView>
   /// Gives up on MapLibre for this view; the Flutter engine takes over.
   void _fail(String reason) {
     if (_disposed || _failure != null) return;
-    stderr.writeln('map engine: MapLibre failed ($reason), using Flutter');
+    mapEngineLog('map engine: MapLibre failed ($reason), using Flutter');
     _destroyMap();
     setState(() {
       _failure = reason;
@@ -427,59 +441,46 @@ class _MapLibreViewState extends State<MapLibreView>
   /// Reads the widget's rectangle and the pixel ratio and makes the native
   /// surface match; creates the native map on the first call that can.
   void _syncGeometry() {
-    final handles = _handles, bridge = _bridge;
-    if (_disposed || !mounted || handles == null || bridge == null) return;
+    final bridge = _bridge;
+    if (_disposed || !mounted || !_prepared || bridge == null) return;
     final box = context.findRenderObject();
     if (box is! RenderBox || !box.hasSize || box.size.isEmpty) return;
     final origin = box.localToGlobal(Offset.zero);
-    final rect = Rect.fromLTWH(
-      origin.dx.roundToDouble(),
-      origin.dy.roundToDouble(),
-      box.size.width.roundToDouble(),
-      box.size.height.roundToDouble(),
-    );
-    final scale = View.of(context).devicePixelRatio.round().clamp(1, 4);
+    // A subsurface sits on whole logical pixels; a texture covers the box
+    // exactly (logical sizes are fractions at Android's densities).
+    final rect = _inFlutterScene
+        ? origin & box.size
+        : Rect.fromLTWH(
+            origin.dx.roundToDouble(),
+            origin.dy.roundToDouble(),
+            box.size.width.roundToDouble(),
+            box.size.height.roundToDouble(),
+          );
+    final ratio = _surface.ratioFor(View.of(context).devicePixelRatio);
     final map = _map;
-    if (map != null && scale != _scale) {
+    if (map != null && ratio != _ratio) {
       // The pixel ratio is fixed in a MapLibre renderer: start a new one.
       _destroyMap();
     }
     if (_map == null) {
       if (_creating) return;
       _creating = true;
-      _create(rect, scale);
+      _create(rect, ratio);
       _creating = false;
       return;
     }
     if (rect != _rect) {
       _rect = rect;
-      bridge.setGeometry(
-        _map!,
-        handles.x + rect.left.toInt(),
-        handles.y + rect.top.toInt(),
-        rect.width.toInt(),
-        rect.height.toInt(),
-      );
-      // The new position applies when GTK commits the window's surface.
-      _channel.invokeMethod<void>('commit');
+      _surface.setGeometry(rect);
     }
   }
 
-  void _create(Rect rect, int scale) {
-    final handles = _handles!, bridge = _bridge!;
+  void _create(Rect rect, double ratio) {
+    final bridge = _bridge!;
     final events = NativeCallable<Void Function(Int32, Int64)>.listener(
       _onNativeEvent,
     );
-    final map = bridge.create(
-      display: handles.display,
-      parentSurface: handles.surface,
-      x: handles.x + rect.left.toInt(),
-      y: handles.y + rect.top.toInt(),
-      width: rect.width.toInt(),
-      height: rect.height.toInt(),
-      scale: scale,
-      onEvent: events.nativeFunction,
-    );
+    final map = _surface.create(bridge, rect, ratio, events.nativeFunction);
     if (map == null) {
       events.close();
       _fail('the native map could not be created (see stderr)');
@@ -488,13 +489,18 @@ class _MapLibreViewState extends State<MapLibreView>
     _map = map;
     _events = events;
     _rect = rect;
-    _scale = scale;
+    _ratio = ratio;
+    _scale = ratio.ceil();
     _applied = null;
     _appliedBlur = null;
     _loadingStyle = null;
     final env = Platform.environment;
-    // Debug hook: one CSV row per rendered frame.
-    final log = env['MAPSOLY_MAP_FRAMELOG'];
+    // Debug hook: one CSV row per rendered frame. On Android, which has no
+    // environment to set, the system property debug.mapsoly.map_framelog
+    // (a path the app may write, e.g. in its folder on the shared storage).
+    final log = Platform.isAndroid
+        ? androidSystemProperty('debug.mapsoly.map_framelog')
+        : env['MAPSOLY_MAP_FRAMELOG'];
     if (log != null && log.isNotEmpty) bridge.frameLog(map, log);
     // Debug hook MAPSOLY_MAP_SNAPSHOTS=<prefix>,<period ms>,<count>: writes
     // the map's own frames (without the Flutter layer) to <prefix>-NN.ppm.
@@ -511,7 +517,6 @@ class _MapLibreViewState extends State<MapLibreView>
     }
     _sendCamera(widget.controller._camera!, 0, false);
     if (!widget.visible) bridge.setVisible(map, false);
-    _channel.invokeMethod<void>('commit');
     _syncScene();
   }
 
@@ -525,6 +530,7 @@ class _MapLibreViewState extends State<MapLibreView>
     _holeTimer?.cancel();
     _holeOpen = false;
     if (map != null) {
+      _surface.detach();
       // Joins the map thread: no native callback can arrive after this.
       _bridge!.destroy(map);
     }
@@ -545,7 +551,7 @@ class _MapLibreViewState extends State<MapLibreView>
       case MapLibreBridge.eventMapFailed:
         scheduleMicrotask(() => _fail('the native map stopped working'));
       case MapLibreBridge.eventBenchDone:
-        stderr.writeln('map engine: scripted run finished');
+        mapEngineLog('map engine: scripted run finished');
     }
   }
 
@@ -642,7 +648,9 @@ class _MapLibreViewState extends State<MapLibreView>
   List<double>? _appliedBlur;
 
   List<double> _blurOf(MapScene scene, Size size) {
-    if (_blurMode == '0') return const [];
+    // A map inside Flutter's scene is blurred by the BackdropFilter of the
+    // glass surfaces themselves.
+    if (_blurMode == '0' || _inFlutterScene) return const [];
     return [
       for (final r in scene.blurRects) ...[r.left, r.top, r.width, r.height],
       if (_blurMode == 'strip') ...[0, size.height - 64, size.width, 64],
@@ -740,7 +748,7 @@ class _MapLibreViewState extends State<MapLibreView>
         pmtilesPath: served == null ? packs.single.path : null,
         tiles: served,
         buildings3d: scene.buildings3d || _debug3d,
-        assetsDir: MapLibreEngine.assetsDirectory,
+        assetsDir: _surface.assetsDirectory,
         colors: colors,
       );
     } else {
@@ -748,7 +756,7 @@ class _MapLibreViewState extends State<MapLibreView>
         tilesUrl: _tiles!.urlTemplate('osm'),
         dark: dark,
         highDensity: _scale > 1,
-        assetsDir: MapLibreEngine.assetsDirectory,
+        assetsDir: _surface.assetsDirectory,
         colors: colors,
       );
     }
@@ -1008,6 +1016,7 @@ class _MapLibreViewState extends State<MapLibreView>
     _gestures.dispose();
     _fling.dispose();
     _destroyMap();
+    _surface.dispose();
     super.dispose();
   }
 
@@ -1059,6 +1068,26 @@ class _MapLibreViewState extends State<MapLibreView>
         _syncScene();
         // The rectangle on screen is known after layout.
         WidgetsBinding.instance.addPostFrameCallback((_) => _syncGeometry());
+        // Until the map is up, the style's own background colour instead of
+        // whatever is behind the window.
+        final placeholder =
+            _styleBackground[_dark ? 'dark' : 'bright'] ??
+            (_dark ? const Color(0xFF14181C) : const Color(0xFFF8F4F0));
+        final attribution = Align(
+          alignment: Alignment.bottomRight,
+          child: Padding(
+            padding: insets + const EdgeInsets.all(2),
+            child: Text(
+              '© OpenStreetMap contributors',
+              style: TextStyle(
+                fontSize: 10,
+                color: scheme.onSurface.withValues(alpha: 0.7),
+                backgroundColor: scheme.surface.withValues(alpha: 0.6),
+              ),
+            ),
+          ),
+        );
+        final mapView = _mapView;
         return Listener(
           behavior: HitTestBehavior.opaque,
           onPointerDown: (e) =>
@@ -1073,30 +1102,24 @@ class _MapLibreViewState extends State<MapLibreView>
               _gestures.scroll(e.localPosition, e.scrollDelta.dy);
             }
           },
-          child: CustomPaint(
-            painter: _HolePainter(
-              open: _holeOpen && widget.visible,
-              // Until the map is up, the style's own background colour
-              // instead of whatever is behind the window.
-              placeholder:
-                  _styleBackground[_dark ? 'dark' : 'bright'] ??
-                  (_dark ? const Color(0xFF14181C) : const Color(0xFFF8F4F0)),
-            ),
-            child: Align(
-              alignment: Alignment.bottomRight,
-              child: Padding(
-                padding: insets + const EdgeInsets.all(2),
-                child: Text(
-                  '© OpenStreetMap contributors',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: scheme.onSurface.withValues(alpha: 0.7),
-                    backgroundColor: scheme.surface.withValues(alpha: 0.6),
+          child: mapView == null
+              ? CustomPaint(
+                  painter: _HolePainter(
+                    open: _holeOpen && widget.visible,
+                    placeholder: placeholder,
                   ),
+                  child: attribution,
+                )
+              // In Flutter's scene: the map is a layer of its own above the
+              // placeholder, shown once it has something to show.
+              : Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    ColoredBox(color: placeholder),
+                    if (_holeOpen) mapView,
+                    attribution,
+                  ],
                 ),
-              ),
-            ),
-          ),
         );
       },
     );

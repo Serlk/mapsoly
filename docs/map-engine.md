@@ -6,13 +6,15 @@ The map screen describes what to show (`MapScene`) and talks to a `MapViewContro
 
 | Engine | File | Used when |
 |---|---|---|
-| MapLibre Native | `maplibre_engine.dart` + `maplibre/` + `native/maplibre/` | Linux on Wayland, bridge library and map assets present in the bundle |
+| MapLibre Native | `maplibre_engine.dart` + `maplibre/` + `native/maplibre/` | Linux on Wayland, bridge library and map assets present in the bundle; Android, bridge library in the APK (see [Android](#android)) |
 | Flutter (`flutter_map` + `vector_map_tiles`) | `flutter_map_engine.dart` | everywhere else, and whenever MapLibre cannot start |
 
 One line on stderr says which engine was chosen and why, e.g.
 `map engine: Flutter (no /path/lib/libmapsoly_mln.so)`.
-`MAPSOLY_MAP_ENGINE=flutter` forces the Flutter engine; `MAPSOLY_MAP_ENGINE=maplibre` is
-accepted but still falls back when MapLibre cannot work. A failure after start (the native
+`MAPSOLY_MAP_ENGINE=flutter` forces the Flutter engine (on Android, which has no
+environment to set: `adb shell setprop debug.mapsoly.map_engine flutter`, read when the
+app starts); `MAPSOLY_MAP_ENGINE=maplibre` is accepted but still falls back when MapLibre
+cannot work. A failure after start (the native
 map cannot be created, the style does not load, the map thread gives up) also falls back,
 inside the same view, with `map engine: MapLibre failed (...), using Flutter`.
 
@@ -20,6 +22,11 @@ The background (why MapLibre, why this way of embedding, measurements) is in
 `docs/maplibre-spike.md` and `docs/maplibre-flutter-prototype.md` ("route B").
 
 ## How the MapLibre engine works
+
+This section describes Linux. Scene, style, camera, gestures and the tile server are the
+same code on Android; where the map is drawn and how it gets on screen differs, see
+[Android](#android). That difference sits behind `MapSurface`
+(`maplibre/surface.dart`: `WaylandMapSurface`, `AndroidMapSurface`).
 
 ```
  Flutter window (GTK, transparent)        <- cards, buttons, sheets: ordinary widgets
@@ -165,6 +172,131 @@ the map view alone under a translucent bar, with scripted camera moves
 4.8 MB in total (the untrimmed fonts are 235 MB). They are generated, not committed. Labels
 in other scripts (CJK, Arabic, ...) are not drawn.
 
+## Android
+
+```
+ Flutter scene (Impeller)
+   ... cards, buttons, sheets; Glass = BackdropFilter, blurs whatever is below
+   Listener (gestures)  >  Stack [ placeholder colour | Texture(id) | attribution ]
+                                                         ^ SurfaceProducer (ImageReader)
+ libmapsoly_mln.so: MapLibre Native, GLES 3, own thread, own EGL context
+   EGL window surface on the producer's ANativeWindow  -- eglSwapBuffers -->
+```
+
+### Design
+
+- **The map is a Flutter texture.** `MapSurface.kt` creates a
+  `TextureRegistry.SurfaceProducer`; its `Surface` goes to the bridge as an
+  `ANativeWindow`, the bridge makes an EGL window surface on it with its own GLES 3
+  context and MapLibre renders there (`native/maplibre/android/backend.hpp`). Flutter
+  shows it with a `Texture` widget at the bottom of the view. So, unlike on Linux, the map
+  *is* part of Flutter's scene: no transparent window, no hole, it may be clipped or
+  covered by anything, and the glass surfaces blur it with their own `BackdropFilter`.
+  `mlnb_set_blur` does nothing on Android and `MapScene.blurRects` is not sent.
+- **One bridge, two backends.** `mlnb.cpp` is shared; the Wayland backend and the Android
+  one are selected with `#ifdef __ANDROID__`. The C API is the same except for how a map
+  gets its surface: `mlnb_android_create(window, width_px, height_px, pixel_ratio, ...)`
+  and `mlnb_android_set_surface(map, window, width_px, height_px)` replace `mlnb_create`
+  and `mlnb_set_geometry` (which exist on Android but do nothing useful). These symbols
+  are not in the Linux library; its ABI is still version 6 and `bridge.dart` looks the
+  Android ones up only on Android.
+- **Pixel ratio is the real one** (2.75 on a 440 dpi phone, not rounded): the texture has
+  exactly the widget's device pixels, the map's logical size is that divided by the ratio.
+  Pin and arrow images are drawn at the next whole number.
+- **The window comes and goes.** A resize (rotation) gives the producer a new surface, and
+  Android takes the surface away while the app is in the background
+  (`SurfaceLifecycle.resetInBackground`) and makes a new one afterwards. Kotlin tells the
+  native library first, synchronously (`mlnb_android_unregister_window` returns when the
+  map thread no longer touches the window), then Dart, which later passes the new window
+  to `mlnb_android_set_surface`. The EGL context, and with it every texture and buffer of
+  MapLibre, survives: without a window it is current on a 1x1 pbuffer and nothing is
+  drawn. Window pointers that Dart holds are only ever compared against the list of
+  windows Kotlin has registered, never dereferenced blindly. `TextureSurfaceController`
+  (`maplibre/surface_android.dart`) keeps the texture at the size wanted last.
+- **Pacing.** `eglSwapBuffers` does not wait here (the consumer is Flutter's raster
+  thread; swap interval 0), so frames are paced by the display: a small thread with an
+  `ALooper` asks `AChoreographer` for one callback per frame drawn; the next frame is
+  drawn right after that vsync. Every frame the map queues makes Flutter composite a
+  frame of its own.
+- **Logging** goes to logcat: tag `mlnb` for the bridge and MapLibre, `flutter` for the
+  `map engine: ...` lines. No signal handler is installed (Android writes a tombstone with
+  a backtrace itself) and the map thread is not pinned to cores.
+
+### MapLibre Native for Android: what it is built from
+
+MapLibre's own Android platform (`platform/android`) is the native half of its Java SDK:
+run loop, HTTP, image decoding and text helpers there call into Java classes. This app
+has no such SDK, so the core is built alone (`MLN_WITH_CORE_ONLY`, GLES renderer) by
+`native/maplibre/android/CMakeLists.txt` with these pieces:
+
+| Piece | Linux build | Android build |
+|---|---|---|
+| run loop, timers, async tasks | libuv (system) | libuv 1.51.0, static |
+| file sources, PMTiles, MBTiles, offline database | `platform/default` | the same files |
+| SQLite, HarfBuzz, FreeType | vendored in MapLibre | the same |
+| bidi, case mapping, collation | system ICU | MapLibre's vendored ICU subset + nunicode; number formatting is the plain fallback |
+| image decoding | libpng, libjpeg, libwebp | libpng 1.6.50 only (`android/image.cpp`): sprites and every tile the app serves are PNG |
+| HTTP | curl | `android/http_file_source.cpp`: plain HTTP/1.0 to `127.0.0.1` only, a non-blocking socket per request on the file-source thread, gzip bodies inflated; any other host is refused |
+| logging, thread names | stderr, pthread | `android/logging.cpp` (logcat), `android/thread.cpp` |
+| JNI | - | two functions (`android/jni.cpp`): `Surface` <-> `ANativeWindow` |
+
+The HTTP client can be that small because MapLibre never talks to the network in this
+app: packs are files, glyphs and sprites are files, and traffic and the online raster map
+come from the Dart tile server on the loopback interface. The library needs only `libEGL`,
+`libGLESv3`, `libandroid`, `liblog`, `libz`, `libm`, `libdl`, `libc`; libc++ is linked
+statically; API level 24, 16 KiB pages.
+
+### Build
+
+```sh
+tool/build_maplibre.sh assets            # glyphs and sprites (as for Linux), once
+tool/build_maplibre_android.sh           # arm64-v8a and x86_64, then the assets archive
+tool/build_maplibre_android.sh x86_64    # one ABI (x86_64 = emulator)
+tool/build_maplibre_android.sh assets    # only android/app/src/main/assets/maplibre.zip
+flutter build apk --release --no-pub
+```
+
+It needs the NDK (28.2), the system's CMake (3.25 or newer; the SDK's 3.22 is too old for
+MapLibre) and ninja, git, curl, python3; no root, no Docker. The MapLibre source is the
+tree of the Linux build (`data/maplibre-build/maplibre-native`, the commit pinned in
+`spike/maplibre/build.sh`; fetched if missing); libuv and libpng are downloaded and checked
+against SHA-256 sums in the script. Build trees are in `data/maplibre-android/`. A first
+build takes a few minutes per ABI on a 16-thread PC; after an edit of the bridge,
+seconds.
+
+Results, both git-ignored: `android/app/src/main/jniLibs/<abi>/libmapsoly_mln.so`
+(stripped: 9.7 MB arm64-v8a, 10.0 MB x86_64) and `android/app/src/main/assets/maplibre.zip`
+(2.8 MB: the 4.7 MB of `linux/prebuilt/maplibre/`, deflated). Without the library the app
+builds and uses the Flutter engine (`map engine: Flutter (cannot load ...)`).
+
+**Assets.** MapLibre reads glyphs and sprites as plain files, so `MapSurface.kt` unpacks
+the archive into `<files>/maplibre/` at the first start of each installed version (a
+marker file holds the package's update time) and gives Dart the path. A missing archive
+makes the view fall back to the Flutter engine.
+
+### Differences from Linux, limits
+
+- No blur pass, no subsurface, no frame-callback pacing, no core pinning, no crash
+  handler (see above); `MLNB_FREERUN`, `MLNB_NO_PIN`, `MLNB_NO_CRASH_HANDLER` and
+  `MAPSOLY_MAP_BLUR` mean nothing there. Of the debug hooks only the engine override and
+  the frame log exist: `adb shell setprop debug.mapsoly.map_framelog
+  /sdcard/Android/data/dev.mapsoly.mapsoly/files/frames.csv`.
+- JPEG and WebP images are not decoded and MapLibre cannot fetch from the network itself.
+  A style that needs either would have to go through the tile server (as PNG).
+- The map is one frame behind the widgets drawn over it in the worst case (it is drawn
+  after a vsync and composited by Flutter at the next one), and every map frame costs a
+  Flutter frame with its blurs on top. Whether that matters on a slow phone is not known.
+- The texture is the full resolution of the screen. Rendering at a lower pixel ratio and
+  letting Flutter scale it would be the first thing to try on a weak GPU; not done.
+- armeabi-v7a is not built by default (the script accepts it; never tried).
+- **Tested on the emulator only** (x86_64, API 34). The arm64 library is built and
+  packaged but has never run; frame rates on a phone are unmeasured. See
+  `docs/android.md`.
+- The emulator's default software renderer (`-gpu swiftshader_indirect`) draws the map
+  without any text or icons: its GLES translator mishandles the alpha-only glyph textures.
+  With `-gpu swangle_indirect` (ANGLE on SwiftShader) and with `-gpu host` everything is
+  drawn. No GL error is reported in either case.
+
 ## Debug hooks (environment)
 
 | Variable | Effect |
@@ -187,14 +319,15 @@ in other scripts (CJK, Arabic, ...) are not drawn.
 
 `test/map/engine/`: camera arithmetic and fitting, the gesture machine, style rewriting for
 both bundled styles, scene diffing and GeoJSON, tile-server URL handling and the Yandex
-strip maths. The native bridge and the widget itself are only tested on the device.
+strip maths, and (`surface_test.dart`) the Android texture's size/window bookkeeping
+against a fake platform channel. The native bridge and the widget itself are only tested
+on the device.
 
 ## Not done
 
-- Android (planned through `maplibre_gl` or `maplibre` behind the same interface), X11,
-  the PC: all use the Flutter engine.
-- Route A of the prototype (map as a Flutter texture) is not in this bridge; the code is in
-  `spike/maplibre_flutter/`.
+- X11 uses the Flutter engine.
+- On Linux the map is not a Flutter texture (route A of the prototype, code in
+  `spike/maplibre_flutter/`); on Android it is, see above.
 - The subsurface is not synchronised with Flutter frames: during a window resize, or if the
   map widget were moved or animated, map and widgets can be a frame apart. The widget must
   not be clipped, faded or transformed; anything meant to cover it must be opaque.

@@ -1,4 +1,7 @@
-// mlnb: one MapLibre Native map in a Wayland subsurface below a parent surface.
+// mlnb: one MapLibre Native map in a Wayland subsurface below a parent surface (Linux),
+// or in an Android window that feeds a Flutter texture (android/backend.hpp).
+//
+// What follows describes the Wayland backend; the differences are in android/backend.hpp.
 //
 // Threads:
 //   map thread ("mln-map")  owns the mln::Map, its RunLoop, the Renderer, the EGL context
@@ -48,6 +51,13 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
+#ifdef __ANDROID__
+#include <android/choreographer.h>
+#include <android/log.h>
+#include <android/looper.h>
+#include <android/native_window.h>
+#include <pthread.h>
+#else
 #include <wayland-client.h>
 #include <wayland-egl.h>
 
@@ -56,11 +66,15 @@
 #include <sched.h>
 #include <signal.h>
 #include <ucontext.h>
-#include <unistd.h>
 #include <unwind.h>
+#endif
+#include <unistd.h>
 
 #include <atomic>
+#include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -70,6 +84,15 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
+
+// Diagnostics go to stderr, which is the app's log on Linux and nowhere on Android:
+// there they go to logcat (tag "mlnb").
+#ifdef __ANDROID__
+#define MLNB_LOG(...) __android_log_print(ANDROID_LOG_WARN, "mlnb", __VA_ARGS__)
+#else
+#define MLNB_LOG(...) std::fprintf(stderr, __VA_ARGS__)
+#endif
 
 namespace {
 
@@ -277,7 +300,7 @@ private:
             if (!ok) {
                 char log[512] = {0};
                 glGetShaderInfoLog(sh, sizeof(log) - 1, nullptr, log);
-                std::fprintf(stderr, "mlnb: blur shader: %s\n", log);
+                MLNB_LOG("mlnb: blur shader: %s\n", log);
             }
             return sh;
         };
@@ -291,7 +314,7 @@ private:
         GLint ok = 0;
         glGetProgramiv(program, GL_LINK_STATUS, &ok);
         if (!ok) {
-            std::fprintf(stderr, "mlnb: blur program does not link; blur is off\n");
+            MLNB_LOG("mlnb: blur program does not link; blur is off\n");
             glDeleteProgram(program);
             program = 0;
             failed = true;
@@ -327,6 +350,9 @@ private:
     Backend& backend;
 };
 
+#ifdef __ANDROID__
+#include "android/backend.hpp"
+#else
 // EGL window surface on a wl_subsurface placed below the parent surface.
 class Backend final : public mln::gl::RendererBackend, public mln::gfx::Renderable {
 public:
@@ -396,7 +422,7 @@ public:
         makeCurrent();
         eglSwapInterval(dpy, 0); // pacing is done with frame callbacks, see swapBuffers()
         wl_display_flush(wl);
-        std::fprintf(stderr, "mlnb: %s | %s | subsurface %ux%u scale %d\n", glGetString(GL_RENDERER),
+        MLNB_LOG("mlnb: %s | %s | subsurface %ux%u scale %d\n", glGetString(GL_RENDERER),
                      glGetString(GL_VERSION), fb.width, fb.height, scale);
     }
 
@@ -578,6 +604,7 @@ private:
     EGLContext ctx = EGL_NO_CONTEXT;
     EGLSurface eglSurface = EGL_NO_SURFACE;
 };
+#endif // !__ANDROID__
 
 void Resource::bind() {
     backend.bindDefault();
@@ -591,7 +618,13 @@ void Resource::swap() {
 // handler writes the signal, the last bridge call and a raw backtrace to stderr (the
 // app's log), then lets the default action happen. Addresses are printed relative to
 // their module: `addr2line -e <unstripped module> <offset>` resolves them.
+//
+// Not on Android: the system writes a tombstone with a symbolised backtrace for every
+// native crash, and the runtime's own signal chain must not be disturbed.
 std::atomic<const char*> g_lastCall{"(none)"};
+#define MLNB_CALL() g_lastCall.store(__func__)
+
+#ifndef __ANDROID__
 struct sigaction g_oldActions[NSIG];
 
 void writeStr(const char* s) {
@@ -692,8 +725,6 @@ void installCrashHandler() {
     });
 }
 
-#define MLNB_CALL() g_lastCall.store(__func__)
-
 void pinToBigCores() {
     long cap[CPU_SETSIZE];
     long best = 0;
@@ -719,13 +750,23 @@ void pinToBigCores() {
     }
     if (count > 0 && count < n) sched_setaffinity(0, sizeof(set), &set);
 }
+#endif // !__ANDROID__
 
 } // namespace
 
 struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
     // --- configuration (set before the thread starts)
+#ifdef __ANDROID__
+    ANativeWindow* firstWindow = nullptr; // a reference of its own, handed to the backend
+    double pixelRatio = 1;                // device pixels per logical pixel; not an integer
+    int fbWidth = 1, fbHeight = 1;        // device pixels
+    // The window the owner last attached, as seen by the calling threads (the map
+    // thread may still be about to switch to it). Guarded by g_registry.
+    void* attachedWindow = nullptr;
+#else
     wl_display* wlDisplay = nullptr;
     wl_surface* parent = nullptr;
+#endif
     int x = 0, y = 0, width = 1, height = 1, scale = 1;
     std::string cachePath;
     mlnb_event_cb cb = nullptr;
@@ -764,7 +805,7 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
     void fail(const char* why) {
         if (failed) return;
         failed = true;
-        std::fprintf(stderr, "mlnb: map failed: %s\n", why);
+        MLNB_LOG("mlnb: map failed: %s\n", why);
         emit(MLNB_EVENT_MAP_FAILED, 0);
     }
 
@@ -790,7 +831,7 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
         }
     }
     void onDidFailLoadingMap(mln::MapLoadError, const std::string& msg) override {
-        std::fprintf(stderr, "mlnb: map load failed: %s\n", msg.c_str());
+        MLNB_LOG("mlnb: map load failed: %s\n", msg.c_str());
         if (!styleAnnounced) {
             styleAnnounced = true;
             emit(MLNB_EVENT_STYLE_FAILED, styleGeneration);
@@ -821,7 +862,7 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
                 render();
                 renderErrors = 0;
             } catch (const std::exception& e) {
-                std::fprintf(stderr, "mlnb: frame failed: %s\n", e.what());
+                MLNB_LOG("mlnb: frame failed: %s\n", e.what());
                 dirty = true;
                 if (++renderErrors >= kMaxRenderErrors) fail("too many failed frames");
             }
@@ -859,20 +900,32 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
 
     void run(std::promise<bool>& started) {
         mln::platform::setCurrentThreadName("mln-map");
+#ifndef __ANDROID__
+        // (Android schedules the threads of the app on screen itself.)
         if (!std::getenv("MLNB_NO_PIN")) pinToBigCores();
+#endif
         bool announced = false;
         try {
             mln::util::RunLoop runLoop(mln::util::RunLoop::Type::New);
+#ifdef __ANDROID__
+            const auto ratio = static_cast<float>(pixelRatio);
+            ANativeWindow* window = firstWindow;
+            firstWindow = nullptr; // the backend owns the reference, also when it throws
+            backend = std::make_unique<Backend>(
+                window, mln::Size{static_cast<uint32_t>(fbWidth), static_cast<uint32_t>(fbHeight)});
+#else
+            const auto ratio = static_cast<float>(scale);
             const mln::Size fb{static_cast<uint32_t>(width * scale), static_cast<uint32_t>(height * scale)};
             backend = std::make_unique<Backend>(wlDisplay, parent, x, y, fb, scale);
-            renderer = std::make_unique<mln::Renderer>(*backend, static_cast<float>(scale));
+#endif
+            renderer = std::make_unique<mln::Renderer>(*backend, ratio);
             mln::ResourceOptions resourceOptions;
             resourceOptions.withCachePath(cachePath);
             map = std::make_unique<mln::Map>(
                 *this, *this,
                 mln::MapOptions()
                     .withSize({static_cast<uint32_t>(width), static_cast<uint32_t>(height)})
-                    .withPixelRatio(static_cast<float>(scale)),
+                    .withPixelRatio(ratio),
                 resourceOptions, mln::ClientOptions());
             map->setBounds(mln::BoundOptions().withMinZoom(1.0).withMaxZoom(20.0).withMaxPitch(60.0));
 
@@ -880,10 +933,12 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
             backend->onFrame = [this] {
                 if (asyncTick) asyncTick->send();
             };
+#ifndef __ANDROID__
             // Wayland events for this thread's queue: the socket ...
             runLoop.addWatch(backend->fd(), mln::util::RunLoop::Event::Read, [this](int, mln::util::RunLoop::Event) {
                 backend->dispatch(true);
             });
+#endif
             // ... and a slow poll, because another thread (GTK) may have read our events
             // off the socket while this one was busy; also drives the benchmark script.
             pollTimer = std::make_unique<mln::util::Timer>();
@@ -902,7 +957,7 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
                     runLoop.run();
                     break;
                 } catch (const std::exception& e) {
-                    std::fprintf(stderr, "mlnb: map loop: %s\n", e.what());
+                    MLNB_LOG("mlnb: map loop: %s\n", e.what());
                     inTick = false;
                     if (++errors == 5) fail("too many errors in the map loop");
                 }
@@ -912,14 +967,18 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
                 std::scoped_lock lock(postMutex);
                 loop = nullptr;
             }
+#ifdef __ANDROID__
+            backend->stopVsync(); // its thread calls onFrame, which uses asyncTick
+#else
             runLoop.removeWatch(backend->fd());
+#endif
             pollTimer.reset();
             asyncTick.reset();
             map.reset();
             renderer.reset();
             backend.reset();
         } catch (const std::exception& e) {
-            std::fprintf(stderr, "mlnb: map thread failed: %s\n", e.what());
+            MLNB_LOG("mlnb: map thread failed: %s\n", e.what());
             {
                 std::scoped_lock lock(postMutex);
                 loop = nullptr;
@@ -934,32 +993,174 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
         frameLog = nullptr;
     }
 
+    // False when the map thread is gone already and fn was dropped.
     template <class Fn>
-    void post(Fn&& fn) {
+    bool post(Fn&& fn) {
         std::scoped_lock lock(postMutex);
-        if (loop) {
-            loop->invoke([this, fn = std::forward<Fn>(fn)]() mutable {
-                if (!map || !backend) return;
-                try {
-                    fn();
-                } catch (const std::exception& e) {
-                    std::fprintf(stderr, "mlnb: %s: %s\n", g_lastCall.load(), e.what());
-                }
-            });
-        }
+        if (!loop) return false;
+        loop->invoke([this, fn = std::forward<Fn>(fn)]() mutable {
+            if (!map || !backend) return;
+            try {
+                fn();
+            } catch (const std::exception& e) {
+                MLNB_LOG("mlnb: %s: %s\n", g_lastCall.load(), e.what());
+            }
+        });
+        return true;
     }
     std::mutex postMutex; // guards `loop` against a post racing with shutdown
+
+    // Starts the map thread and waits until the map is up. On failure the map is deleted.
+    bool start() {
+        std::promise<bool> started;
+        auto fut = started.get_future();
+        thread = std::thread([this, &started] { run(started); });
+        if (fut.get()) return true;
+        thread.join();
+        delete this;
+        return false;
+    }
+
+#ifdef __ANDROID__
+    // Device pixels of the surface -> the map's size in logical pixels.
+    void setPixelSize(int widthPx, int heightPx) {
+        fbWidth = widthPx < 1 ? 1 : widthPx;
+        fbHeight = heightPx < 1 ? 1 : heightPx;
+        width = std::max(1, static_cast<int>(std::lround(fbWidth / pixelRatio)));
+        height = std::max(1, static_cast<int>(std::lround(fbHeight / pixelRatio)));
+    }
+
+    // Takes the map off its window and returns when the map thread no longer touches
+    // it (or after two seconds, should that thread be stuck).
+    void detachWindowAndWait() {
+        struct Done {
+            std::mutex mutex;
+            std::condition_variable cv;
+            bool done = false;
+        };
+        // Signals when the task has run, and also when it is dropped without running.
+        struct Signal {
+            explicit Signal(std::shared_ptr<Done> state_)
+                : state(std::move(state_)) {}
+            Signal(const Signal&) = delete;
+            std::shared_ptr<Done> state;
+            ~Signal() {
+                std::scoped_lock lock(state->mutex);
+                state->done = true;
+                state->cv.notify_all();
+            }
+        };
+        auto state = std::make_shared<Done>();
+        auto signal = std::make_shared<Signal>(state);
+        post([this, signal]() mutable {
+            backend->setWindow(nullptr, backend->getSize());
+            signal.reset();
+        });
+        signal.reset();
+        std::unique_lock lock(state->mutex);
+        state->cv.wait_for(lock, std::chrono::seconds(2), [&] { return state->done; });
+    }
+#endif
 
     template <class T, class... Args>
     static std::optional<T> parse(const char* what, const std::string& json, Args&&... args) {
         mln::style::conversion::Error error;
         auto v = mln::style::conversion::convertJSON<T>(json, error, std::forward<Args>(args)...);
-        if (!v) std::fprintf(stderr, "mlnb: bad %s: %s\n", what, error.message.c_str());
+        if (!v) MLNB_LOG("mlnb: bad %s: %s\n", what, error.message.c_str());
         return v;
     }
 };
 
+#ifdef __ANDROID__
+namespace {
+// Live maps and the windows the Java side has handed out and not taken back yet. A
+// window pointer that is not listed is never dereferenced: the Dart side may still hold
+// one that Android has reclaimed in the meantime.
+std::mutex g_registry;
+std::vector<mlnb_map*> g_maps;
+std::vector<void*> g_windows;
+
+// A reference to a window on its way to the map thread; given back if it never arrives.
+struct WindowRef {
+    explicit WindowRef(ANativeWindow* window_)
+        : window(window_) {}
+    WindowRef(const WindowRef&) = delete;
+    ANativeWindow* window;
+    ~WindowRef() {
+        if (window) ANativeWindow_release(window);
+    }
+    ANativeWindow* take() {
+        ANativeWindow* w = window;
+        window = nullptr;
+        return w;
+    }
+};
+
+// g_registry held. The window with a reference of its own, or null when it is not valid.
+ANativeWindow* acquireListed(void* window) {
+    if (!window || std::find(g_windows.begin(), g_windows.end(), window) == g_windows.end()) return nullptr;
+    auto* w = static_cast<ANativeWindow*>(window);
+    ANativeWindow_acquire(w);
+    return w;
+}
+} // namespace
+#endif
+
 extern "C" {
+
+#ifdef __ANDROID__
+void mlnb_android_register_window(void* native_window) {
+    std::scoped_lock lock(g_registry);
+    if (native_window) g_windows.push_back(native_window);
+}
+
+void mlnb_android_unregister_window(void* native_window) {
+    std::scoped_lock lock(g_registry);
+    std::erase(g_windows, native_window);
+    for (mlnb_map* m : g_maps) {
+        if (m->attachedWindow != native_window) continue;
+        m->attachedWindow = nullptr;
+        m->detachWindowAndWait();
+    }
+}
+
+mlnb_map* mlnb_android_create(void* native_window, int32_t width_px, int32_t height_px, double pixel_ratio,
+                              const char* cache_path, mlnb_event_cb cb) {
+    MLNB_CALL();
+    std::scoped_lock lock(g_registry);
+    auto* m = new mlnb_map();
+    m->firstWindow = acquireListed(native_window);
+    m->attachedWindow = m->firstWindow;
+    m->pixelRatio = pixel_ratio > 0.1 ? pixel_ratio : 1.0;
+    m->setPixelSize(width_px, height_px);
+    m->cachePath = cache_path && *cache_path ? cache_path : ":memory:";
+    m->cb = cb;
+    if (!m->start()) return nullptr;
+    g_maps.push_back(m);
+    return m;
+}
+
+void mlnb_android_set_surface(mlnb_map* m, void* native_window, int32_t width_px, int32_t height_px) {
+    MLNB_CALL();
+    std::shared_ptr<WindowRef> ref;
+    {
+        std::scoped_lock lock(g_registry);
+        ref = std::make_shared<WindowRef>(acquireListed(native_window));
+        m->attachedWindow = ref->window;
+    }
+    m->post([m, ref, width_px, height_px] {
+        const int oldWidth = m->width, oldHeight = m->height;
+        m->setPixelSize(width_px, height_px);
+        m->backend->setWindow(ref->take(), {static_cast<uint32_t>(m->fbWidth), static_cast<uint32_t>(m->fbHeight)});
+        if (m->width != oldWidth || m->height != oldHeight) {
+            m->map->setSize({static_cast<uint32_t>(m->width), static_cast<uint32_t>(m->height)});
+        }
+        m->dirty = true;
+        m->map->triggerRepaint();
+        if (m->asyncTick) m->asyncTick->send();
+    });
+}
+#endif
 
 int32_t mlnb_abi_version(void) {
     return MLNB_ABI_VERSION;
@@ -968,6 +1169,10 @@ int32_t mlnb_abi_version(void) {
 mlnb_map* mlnb_create(void* wl_display_, void* parent_wl_surface, int32_t x, int32_t y, int32_t width, int32_t height,
                       int32_t scale, const char* cache_path, mlnb_event_cb cb) {
     MLNB_CALL();
+#ifdef __ANDROID__
+    MLNB_LOG("mlnb: mlnb_create is the Wayland entry point; use mlnb_android_create\n");
+    return nullptr;
+#else
     installCrashHandler();
     auto* m = new mlnb_map();
     m->wlDisplay = static_cast<wl_display*>(wl_display_);
@@ -979,20 +1184,20 @@ mlnb_map* mlnb_create(void* wl_display_, void* parent_wl_surface, int32_t x, int
     m->scale = scale < 1 ? 1 : scale;
     m->cachePath = cache_path && *cache_path ? cache_path : ":memory:";
     m->cb = cb;
-    std::promise<bool> started;
-    auto fut = started.get_future();
-    m->thread = std::thread([m, &started] { m->run(started); });
-    if (!fut.get()) {
-        m->thread.join();
-        delete m;
-        return nullptr;
-    }
-    return m;
+    return m->start() ? m : nullptr;
+#endif
 }
 
 void mlnb_destroy(mlnb_map* m) {
     MLNB_CALL();
     if (!m) return;
+#ifdef __ANDROID__
+    {
+        // After this no window callback can find the map.
+        std::scoped_lock lock(g_registry);
+        std::erase(g_maps, m);
+    }
+#endif
     {
         std::scoped_lock lock(m->postMutex);
         if (m->loop) {
@@ -1006,6 +1211,10 @@ void mlnb_destroy(mlnb_map* m) {
 
 void mlnb_set_geometry(mlnb_map* m, int32_t x, int32_t y, int32_t width, int32_t height) {
     MLNB_CALL();
+#ifdef __ANDROID__
+    // The size follows the surface: mlnb_android_set_surface.
+    (void)m;
+#else
     m->post([=] {
         if (width < 1 || height < 1) return;
         m->x = x;
@@ -1017,6 +1226,7 @@ void mlnb_set_geometry(mlnb_map* m, int32_t x, int32_t y, int32_t width, int32_t
                                 {static_cast<uint32_t>(width * m->scale), static_cast<uint32_t>(height * m->scale)});
         if (resized) m->map->setSize({static_cast<uint32_t>(width), static_cast<uint32_t>(height)});
     });
+#endif
 }
 
 void mlnb_set_visible(mlnb_map* m, int32_t visible) {
@@ -1116,7 +1326,7 @@ void mlnb_add_layer(mlnb_map* m, const char* json, const char* before_id) {
                 style.addLayer(std::move(*layer));
             }
         } catch (const std::exception& e) {
-            std::fprintf(stderr, "mlnb: add layer: %s\n", e.what());
+            MLNB_LOG("mlnb: add layer: %s\n", e.what());
         }
     });
 }
@@ -1161,12 +1371,18 @@ void mlnb_set_blur(mlnb_map* m, const float* xywh, int32_t count, float sigma) {
     for (int32_t i = 0; xywh && i < count; ++i) {
         rects.push_back({xywh[4 * i], xywh[4 * i + 1], xywh[4 * i + 2], xywh[4 * i + 3]});
     }
+#ifdef __ANDROID__
+    // The map is a texture in Flutter's scene there: Flutter's own BackdropFilter blurs it.
+    (void)m;
+    (void)sigma;
+#else
     m->post([m, rects = std::move(rects), sigma] {
         m->backend->blurRects = rects;
         m->backend->blurSigma = sigma;
         m->dirty = true;
         m->map->triggerRepaint();
     });
+#endif
 }
 
 void mlnb_snapshot(mlnb_map* m, const char* ppm_path) {

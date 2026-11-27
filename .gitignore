@@ -49,3 +49,8 @@ app.*.map.json
 
 # Cross-built routing server (tool/build_valhalla_android.sh regenerates it)
 /android/app/src/main/jniLibs/*/libmapsoly_valhalla.so
+
+# Cross-built MapLibre map engine and its glyphs/sprites
+# (tool/build_maplibre_android.sh regenerates them)
+/android/app/src/main/jniLibs/*/libmapsoly_mln.so
+/android/app/src/main/assets/maplibre.zip
