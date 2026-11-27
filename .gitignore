@@ -46,3 +46,6 @@ app.*.map.json
 
 # Map data and region packs (large, built by tool/build_region.sh)
 /data/
+
+# Cross-built routing server (tool/build_valhalla_android.sh regenerates it)
+/android/app/src/main/jniLibs/*/libmapsoly_valhalla.so

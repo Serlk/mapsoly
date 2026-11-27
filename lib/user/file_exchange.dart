@@ -11,6 +11,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../map/ui_kit.dart';
+import '../platform/android_bridge.dart';
 import 'file_browser.dart';
 import 'gpx.dart';
 import 'saved_routes.dart';
@@ -53,18 +54,24 @@ abstract class FileExchange {
 /// `xdg-open`, and the built-in [FileBrowserScreen].
 class DesktopFileExchange implements FileExchange {
   /// [home] replaces `$HOME` (tests); [now] the clock used in file names.
-  DesktopFileExchange({Directory? home, DateTime Function()? now})
-    : home = home ?? Directory(Platform.environment['HOME'] ?? '/'),
-      _now = now ?? DateTime.now;
+  DesktopFileExchange({
+    Directory? home,
+    DateTime Function()? now,
+    this.folder = 'Documents/Mapsoly',
+  }) : home = home ?? Directory(Platform.environment['HOME'] ?? '/'),
+       _now = now ?? DateTime.now;
+
+  /// The export folder, relative to [home].
+  final String folder;
 
   /// The user's home folder; the browser never leaves it.
   final Directory home;
   final DateTime Function() _now;
 
-  Directory get _folder => Directory('${home.path}/Documents/Mapsoly');
+  Directory get _folder => Directory('${home.path}/$folder');
 
   @override
-  String get exportFolderLabel => '~/Documents/Mapsoly';
+  String get exportFolderLabel => '~/$folder';
 
   @override
   Future<Directory> exportDirectory() async {
@@ -130,9 +137,81 @@ class DesktopFileExchange implements FileExchange {
   );
 }
 
-/// The exchange for this platform. Android would return an implementation
-/// built on its share sheet and document picker here.
-FileExchange createFileExchange() => DesktopFileExchange();
+/// Android: the app's own folder on the shared storage
+/// (`Android/data/<package>/files/Mapsoly`), which needs no permission and
+/// no picker plugin. A computer sees it over USB; on the phone, file
+/// managers with access to `Android/data` do (the stock one hides that
+/// folder since Android 11). Imports are browsed from the same place.
+class AndroidFileExchange implements FileExchange {
+  AndroidFileExchange({
+    Future<String?> Function()? root,
+    DateTime Function()? now,
+  }) : _root = root ?? _platformRoot,
+       _now = now;
+
+  final Future<String?> Function() _root;
+  final DateTime Function()? _now;
+  DesktopFileExchange? _files;
+
+  static Future<String?> _platformRoot() =>
+      androidChannel.invokeMethod<String>('exportDir');
+
+  /// The same folder logic as on the desktop, rooted in the app's folder.
+  Future<DesktopFileExchange> _inner() async {
+    final known = _files;
+    if (known != null) return known;
+    final root = await _root();
+    if (root == null) {
+      throw const FileSystemException('The shared storage is not available');
+    }
+    return _files = DesktopFileExchange(
+      home: Directory(root),
+      folder: 'Mapsoly',
+      now: _now,
+    );
+  }
+
+  @override
+  String get exportFolderLabel =>
+      'Android/data/dev.mapsoly.mapsoly/files/Mapsoly';
+
+  @override
+  Future<Directory> exportDirectory() async =>
+      (await _inner()).exportDirectory();
+
+  @override
+  Future<File> newExportFile(String baseName, String extension) async =>
+      (await _inner()).newExportFile(baseName, extension);
+
+  // Nothing opens Android/data from outside without a file-provider.
+  @override
+  bool get canReveal => false;
+
+  @override
+  Future<bool> reveal() async => false;
+
+  @override
+  Future<File?> pickFile(
+    BuildContext context, {
+    required String title,
+    required Set<String> extensions,
+  }) async {
+    final DesktopFileExchange files;
+    try {
+      files = await _inner();
+      // The browser starts in the export folder: it has to exist.
+      await files.exportDirectory();
+    } on FileSystemException {
+      return null;
+    }
+    if (!context.mounted) return null;
+    return files.pickFile(context, title: title, extensions: extensions);
+  }
+}
+
+/// The exchange for this platform.
+FileExchange createFileExchange() =>
+    Platform.isAndroid ? AndroidFileExchange() : DesktopFileExchange();
 
 /// Tells the user what was written and where, and offers to open the
 /// folder when the platform can.

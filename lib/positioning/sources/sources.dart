@@ -1,6 +1,6 @@
-/// Platform-independent interfaces of the observation sources. Linux
-/// implementations live next to this file; Android ones can be added later
-/// without touching the estimator or the engine.
+/// Platform-independent interfaces of the observation sources. The Linux
+/// implementations and the Android GNSS source live next to this file; the
+/// estimator and the engine do not know which platform they run on.
 library;
 
 import '../models.dart';

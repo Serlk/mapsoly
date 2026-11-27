@@ -6,6 +6,10 @@
 // packaged libvalhalla.so and serves the same HTTP JSON API through
 // valhalla::tyr::actor_t, which is what valhalla_service does internally.
 //
+// The same source is built for Android against a static libvalhalla made by
+// tool/build_valhalla_android.sh, for the same reason: no service binary
+// without prime_server.
+//
 // Command line is the same as upstream:
 //   mapsoly_valhalla <config.json> [threads]
 // The listen address is taken from httpd.service.listen ("tcp://host:port").
@@ -30,6 +34,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <condition_variable>
 #include <csignal>
 #include <cstdio>
@@ -37,6 +42,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -47,6 +53,7 @@ namespace {
 
 constexpr size_t kMaxHeader = 64 * 1024;
 constexpr size_t kMaxBody = 32 * 1024 * 1024;
+constexpr size_t kWorkerStack = 8 * 1024 * 1024;
 
 using Action = std::string (valhalla::tyr::actor_t::*)(const std::string&,
                                                        const std::function<void()>*,
@@ -293,6 +300,23 @@ private:
   std::deque<int> fds_;
 };
 
+struct Worker {
+  Queue* queue;
+  valhalla::tyr::actor_t* actor;
+};
+
+// Serves queued connections forever; the signature is pthread's.
+void* work(void* arg) {
+  auto* worker = static_cast<Worker*>(arg);
+  for (;;) {
+    int fd = worker->queue->pop();
+    handle(fd, *worker->actor);
+    ::shutdown(fd, SHUT_WR);
+    ::close(fd);
+  }
+  return nullptr;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -306,13 +330,15 @@ int main(int argc, char** argv) {
   }
   setvbuf(stdout, nullptr, _IOLBF, 0);
 
+#ifndef __ANDROID__
   // musl gives new threads a 128 KiB stack by default; Valhalla needs far
   // more (trace_attributes overflowed it on aarch64). Match glibc's 8 MiB.
   pthread_attr_t attr;
   pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 8 * 1024 * 1024);
+  pthread_attr_setstacksize(&attr, kWorkerStack);
   pthread_setattr_default_np(&attr);
   pthread_attr_destroy(&attr);
+#endif
   std::signal(SIGPIPE, SIG_IGN);
 
   unsigned threads = argc > 2 ? static_cast<unsigned>(std::atoi(argv[2])) : 1;
@@ -381,16 +407,25 @@ int main(int argc, char** argv) {
   }
 
   Queue queue;
-  std::vector<std::thread> workers;
+  std::vector<Worker> workers(threads);
   for (unsigned i = 0; i < threads; ++i) {
-    workers.emplace_back([&queue, &actors, i] {
-      for (;;) {
-        int fd = queue.pop();
-        handle(fd, *actors[i]);
-        ::shutdown(fd, SHUT_WR);
-        ::close(fd);
-      }
-    });
+    workers[i] = {&queue, actors[i].get()};
+#ifdef __ANDROID__
+    // bionic has no pthread_setattr_default_np and gives threads 1 MiB, so
+    // the stack size has to be passed per thread, which std::thread cannot.
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, kWorkerStack);
+    pthread_t thread;
+    int err = pthread_create(&thread, &attr, &work, &workers[i]);
+    pthread_attr_destroy(&attr);
+    if (err != 0) {
+      std::fprintf(stderr, "cannot start worker: %s\n", std::strerror(err));
+      return 1;
+    }
+#else
+    std::thread(&work, &workers[i]).detach();
+#endif
   }
 
   std::printf("mapsoly_valhalla (libvalhalla %s) listening on %s with %u thread(s)\n",

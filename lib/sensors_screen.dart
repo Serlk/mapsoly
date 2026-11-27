@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
 import 'map/ui_kit.dart';
+import 'positioning/sources/android_compass.dart';
 import 'positioning/sources/linux_compass.dart';
 import 'settings.dart';
 
@@ -14,6 +16,14 @@ DeviceCompass compassFor(AppSettings settings) => DeviceCompass(
     accelName: settings.accelSensor,
   ),
 );
+
+/// The compass of this device, where the platform has a way to read one:
+/// on Linux the one chosen in the settings, on Android the system's.
+LocalCompass? platformCompass(AppSettings settings) {
+  if (Platform.isLinux) return compassFor(settings);
+  if (Platform.isAndroid) return AndroidCompass();
+  return null;
+}
 
 /// "Sensors" (Linux): which compass to use, chosen by hand when the
 /// automatic pick is wrong, with the live reading to check it against a

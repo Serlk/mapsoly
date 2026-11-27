@@ -332,6 +332,11 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   }
 
   PositioningNotifier? _positioning;
+
+  /// Where reading the position takes the user's consent: its state, and
+  /// the way to ask.
+  LocationAccess? _locationAccess;
+  bool _radioPositioning = true;
   ObdService? _obd;
   Timer? _simulation;
   bool _demoStarted = false;
@@ -639,10 +644,11 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
       _startCompass();
       return;
     }
-    if (widget.testHooks != null || !Platform.isLinux) return;
+    if (widget.testHooks != null) return;
     final key = _compassKey = _compassSettingsKey;
     try {
-      final compass = compassFor(widget.settings);
+      final compass = platformCompass(widget.settings);
+      if (compass == null) return;
       final found = await compass.available();
       if (!mounted || key != _compassKey) {
         unawaited(compass.dispose());
@@ -674,7 +680,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     _hasCompass = false;
     final old = _compass;
     _compass = null;
-    if (old is DeviceCompass) unawaited(old.dispose());
+    if (old is LocalCompass) unawaited(old.dispose());
     unawaited(_findCompass());
   }
 
@@ -682,9 +688,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     try {
       final compass = _compass ??=
           widget.testHooks?.compass ??
-          (widget.testHooks == null && Platform.isLinux
-              ? compassFor(widget.settings)
-              : null);
+          (widget.testHooks == null ? platformCompass(widget.settings) : null);
       if (compass == null) return;
       _compassSub ??= compass.headings.listen((h) {
         _compassHeading = h;
@@ -937,11 +941,14 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     PositioningEngine? engine = hooks?.engine;
     try {
       final dir = widget.user.supportDirectory;
-      if (engine == null && hooks == null && Platform.isLinux && dir != null) {
+      if (engine == null && hooks == null && dir != null) {
         dir.createSync(recursive: true);
-        engine = PositioningEngine.linux(
+        final platform = createPlatformPositioning(
           dbPath: '${dir.path}/positioning.sqlite',
         );
+        engine = platform?.engine;
+        _locationAccess = platform?.access;
+        _radioPositioning = platform?.radio ?? true;
       }
       if (engine != null) {
         // Before anything is collected or sent: the privacy zones.
@@ -1065,8 +1072,12 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
       context: context,
       showDragHandle: true,
       isScrollControlled: true,
-      builder: (context) =>
-          LocationSheet(positioning: _positioning, settings: widget.settings),
+      builder: (context) => LocationSheet(
+        positioning: _positioning,
+        settings: widget.settings,
+        access: _locationAccess,
+        radio: _radioPositioning,
+      ),
     );
   }
 
@@ -1726,6 +1737,8 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
                               obd: _obd,
                               onOpenPacks: _showPacks,
                               showSensors: hooks == null && Platform.isLinux,
+                              locationAccess: _locationAccess,
+                              radioPositioning: _radioPositioning,
                               user: widget.user,
                               services: this,
                               files: _files,

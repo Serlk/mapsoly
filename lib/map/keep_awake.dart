@@ -4,8 +4,9 @@ import 'package:flutter/services.dart';
 /// Keeps the display from turning off, for a phone on the dashboard.
 ///
 /// On Linux the runner holds a Wayland idle inhibitor (see
-/// linux/runner/native_view_plugin.cc); where there is nothing to ask, the
-/// request is quietly dropped.
+/// linux/runner/native_view_plugin.cc), on Android the window gets
+/// FLAG_KEEP_SCREEN_ON (MainActivity.kt); where there is nothing to ask,
+/// the request is quietly dropped.
 class KeepAwake {
   static const _channel = MethodChannel('mapsoly/native_view');
 

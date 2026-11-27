@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import 'obd_session.dart';
-import 'rfcomm_transport.dart';
+import 'bluetooth.dart';
 import 'transport.dart';
 
 /// How the adapter is reached.
@@ -91,7 +91,7 @@ ObdConnector connectorFor(ObdConfig config) {
   final address = config.address.trim();
   switch (config.link) {
     case ObdLink.bluetooth:
-      return () => RfcommObdTransport.connect(address);
+      return bluetoothConnector(address);
     case ObdLink.wifi:
       final parts = address.split(':');
       final port = parts.length > 1 ? int.tryParse(parts.last) : null;

@@ -11,6 +11,7 @@ client; only the base URL differs between phone, PC and a remote server.
 | Valhalla on the phone | **3.6.0** (`valhalla-3.6.0-r2`, Alpine v3.24 `community`) | `apk add valhalla` |
 | Tile builder + PC backend | `ghcr.io/valhalla/valhalla:3.6.0` | `tool/build_routing.sh`, `lib/routing/native/valhalla_service_docker.sh` |
 | Shim build sysroot | Alpine 3.24 aarch64 | `lib/routing/native/build_shim.sh` |
+| Valhalla on Android | **3.6.0** built from source, static; Boost 1.83.0 (headers), protobuf 3.21.12 (lite), lz4 1.10.0 | `tool/build_valhalla_android.sh` |
 
 Things that turned out different from the original plan:
 
@@ -97,12 +98,73 @@ killed app.
 
 **Remote server** – `RemoteValhallaBackend(uri)` / `MAPSOLY_VALHALLA_URL`.
 
-**Android** – not done. It needs libvalhalla built with the NDK; the shim (or
-an FFI binding to `actor_t`) would then work the same way.
+**Android** – `LocalValhallaBackend` spawns the same shim, shipped inside the
+APK; see [Android build](#android-build) below.
 
 Manual end-to-end check (spawn, route, per-edge data, kill, restart, stop):
 
     dart run test/routing/manual_e2e.dart data/packs/<name>/valhalla [binary]
+
+## Android build
+
+Android has no libvalhalla to link against, so it is cross-compiled with the
+NDK and linked statically into the shim:
+
+    tool/build_valhalla_android.sh              # arm64-v8a and x86_64
+    tool/build_valhalla_android.sh x86_64       # one ABI (x86_64 = emulator)
+
+It needs the Android SDK with NDK 28.2.13676358 and the SDK's CMake (ninja
+comes with it), plus git, curl, pkg-config, make and a host C++ compiler. No
+root, no Docker. A first run downloads about 130 MB of sources and takes a few
+minutes per ABI with 8 jobs; later runs only rebuild what is missing, and
+relinking the shim after an edit takes seconds. Everything is kept in
+`data/valhalla-android/` (`dl/`, `src/`, `host/`, `<abi>/build`,
+`<abi>/prefix`, `logs/`).
+
+Result: `android/app/src/main/jniLibs/<abi>/libmapsoly_valhalla.so`
+(gitignored, so run the script before `flutter build apk`; without it the app
+builds but has no routing). Stripped size: 8.2 MB (arm64-v8a), 8.5 MB (x86_64); about 2.5 MB each inside the APK.
+
+How it fits together:
+
+* The file is an **executable** with a library's name. An app may only exec
+  files from its native library directory, and the installer only puts
+  `lib*.so` there. `android/app/build.gradle.kts` sets
+  `packaging.jniLibs.useLegacyPackaging = true` so that the libraries are
+  extracted to disk at install time (the default is to map them from the APK,
+  which cannot be exec'ed).
+* `LocalValhallaBackend.findBinary` gets the native library directory from
+  `/proc/self/maps` (the directory `libapp.so` / `libflutter.so` were loaded
+  from), so no platform channel is involved.
+* The runtime config goes to `Directory.systemTemp`, which the Flutter engine
+  points at the app's cache directory. The `ipc://` entries in it are unused
+  by the shim (they are for `valhalla_service`'s zeromq workers).
+* The binary needs only `libc`, `libm`, `libdl`, `liblog` and `libz` from the
+  system; libc++ is linked statically. API level 24, 16 KiB page alignment.
+* Listening on 127.0.0.1 needs the `INTERNET` permission, which the app has.
+
+Valhalla is configured with `ENABLE_DATA_TOOLS`, `ENABLE_SERVICES`,
+`ENABLE_TOOLS`, `ENABLE_HTTP`, `ENABLE_GDAL`, `ENABLE_PYTHON_BINDINGS` and
+`ENABLE_TESTS` all `OFF`. That removes mjolnir, prime_server/zeromq, curl,
+gdal, sqlite/spatialite, luajit and geos; what remains is
+baldr/loki/meili/midgard/odin/sif/skadi/thor/tyr and needs Boost headers,
+protobuf-lite, lz4 and zlib (zlib comes from the NDK). The CMake options do
+not go further than that: individual actions (isochrone, matrix, …) cannot be
+left out, but `--gc-sections` drops part of the unused code at link time.
+protobuf is pinned to 3.21.12 because later releases need abseil; the script
+builds a host `protoc` of the same version for the code generator.
+
+Known limits:
+
+* 32-bit ABIs are not built. `armeabi-v7a` is accepted by the script but was
+  never tried.
+* Verified on the x86_64 emulator only (Android 14, API 34), by running the
+  binary from `adb shell` on a pack's routing data: `/status`, `/route`
+  (auto, 80 km: 0.59 s for the first request; pedestrian), `/locate` and
+  `/trace_attributes` answered, 115 MB resident afterwards. The arm64 binary
+  is built the same way but has not been run on a device, and the path
+  through the installed app (exec from the native library directory) has not
+  been exercised yet.
 
 ## Measured numbers
 

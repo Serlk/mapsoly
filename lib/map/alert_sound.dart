@@ -3,9 +3,12 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
+import '../platform/android_bridge.dart';
+
 /// A short warning signal: two beeps, played through the system's audio
 /// player. On Linux that is PipeWire/PulseAudio/ALSA's command-line player,
-/// whichever is installed; elsewhere, and in tests, it stays silent.
+/// whichever is installed; on Android the same samples go to the platform
+/// side (AlertPlayer.kt); elsewhere, and in tests, it stays silent.
 class AlertSound {
   static const _players = ['pw-play', 'paplay', 'aplay'];
   static File? _file;
@@ -53,11 +56,11 @@ class AlertSound {
 
   /// Plays the signal; never throws.
   static Future<void> play() async {
-    if (_unavailable ||
-        !Platform.isLinux ||
-        Platform.environment.containsKey('FLUTTER_TEST')) {
+    if (_unavailable || Platform.environment.containsKey('FLUTTER_TEST')) {
       return;
     }
+    if (Platform.isAndroid) return _playAndroid();
+    if (!Platform.isLinux) return;
     try {
       final file = _file ??= await _write();
       final known = _player;
@@ -75,6 +78,23 @@ class AlertSound {
       }
       _unavailable = true;
       debugPrint('Alert sound: no audio player found (${_players.join(', ')})');
+    } on Object catch (e) {
+      debugPrint('Alert sound failed: $e');
+    }
+  }
+
+  static const _rate = 22050;
+  static Uint8List? _pcm;
+
+  static Future<void> _playAndroid() async {
+    try {
+      // The samples without the 44-byte WAV header.
+      final pcm = _pcm ??= Uint8List.sublistView(wav(rate: _rate), 44);
+      final played = await androidChannel.invokeMethod<bool>('playPcm', {
+        'pcm': pcm,
+        'rate': _rate,
+      });
+      debugPrint('alert sound: android (played: $played)');
     } on Object catch (e) {
       debugPrint('Alert sound failed: $e');
     }

@@ -18,6 +18,15 @@ abstract class CompassSource {
   Future<void> stop();
 }
 
+/// A compass of this device, as opposed to a stand-in: it may be missing,
+/// and holds resources to release.
+abstract class LocalCompass implements CompassSource {
+  /// True when the device has the sensors for it.
+  Future<bool> available();
+
+  Future<void> dispose();
+}
+
 /// Reads the compass that iio-sensor-proxy exposes on the system bus
 /// (`net.hadess.SensorProxy.Compass`), which already fuses the
 /// magnetometer with the accelerometer.
@@ -333,7 +342,7 @@ enum CompassChoice {
 
 /// The device compass, as chosen: by default the system's, where it has
 /// one, else the raw sensors.
-class DeviceCompass implements CompassSource {
+class DeviceCompass implements LocalCompass {
   DeviceCompass({
     this.choice = CompassChoice.auto,
     SensorProxyCompass? proxy,
@@ -358,6 +367,7 @@ class DeviceCompass implements CompassSource {
   }
 
   /// True when the chosen kind of compass is there.
+  @override
   Future<bool> available() async => await _pick() != null;
 
   /// What is in use, for showing to the user: "system", "raw" or null.
@@ -385,6 +395,7 @@ class DeviceCompass implements CompassSource {
     await source?.stop();
   }
 
+  @override
   Future<void> dispose() async {
     await stop();
     await _headings.close();

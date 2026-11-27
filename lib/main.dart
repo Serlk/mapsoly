@@ -44,6 +44,18 @@ class MapsolyApp extends StatelessWidget {
     ),
   );
 
+  static SystemUiOverlayStyle _systemBars(Brightness theme) {
+    final icons = theme == Brightness.dark ? Brightness.light : Brightness.dark;
+    return SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: icons,
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarIconBrightness: icons,
+      systemStatusBarContrastEnforced: false,
+      systemNavigationBarContrastEnforced: false,
+    );
+  }
+
   static final _navigator = GlobalKey<NavigatorState>();
 
   /// The hardware or system "back" key: close whatever is on top. Screens
@@ -59,12 +71,18 @@ class MapsolyApp extends StatelessWidget {
         title: 'Mapsoly',
         debugShowCheckedModeBanner: false,
         navigatorKey: _navigator,
-        builder: (context, child) => CallbackShortcuts(
-          bindings: const {
-            SingleActivator(LogicalKeyboardKey.goBack): _back,
-            SingleActivator(LogicalKeyboardKey.browserBack): _back,
-          },
-          child: child!,
+        builder: (context, child) => AnnotatedRegion<SystemUiOverlayStyle>(
+          // Android: the app draws under the system bars, so they carry no
+          // colour of their own, only icons that contrast with the theme.
+          // Other platforms ignore this.
+          value: _systemBars(Theme.of(context).brightness),
+          child: CallbackShortcuts(
+            bindings: const {
+              SingleActivator(LogicalKeyboardKey.goBack): _back,
+              SingleActivator(LogicalKeyboardKey.browserBack): _back,
+            },
+            child: child!,
+          ),
         ),
         themeMode: settings.themeMode,
         theme: theme(Brightness.light),

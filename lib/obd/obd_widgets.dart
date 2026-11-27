@@ -4,7 +4,7 @@ import '../map/ui_kit.dart';
 import '../settings.dart';
 import 'obd_service.dart';
 import 'obd_session.dart';
-import 'rfcomm_transport.dart';
+import 'bluetooth.dart';
 
 String _num(double? v, [int digits = 1]) =>
     v == null ? '—' : v.toStringAsFixed(digits).replaceAll('.', ',');
@@ -64,9 +64,23 @@ class ObdSettingsSection extends StatelessWidget {
     final picked = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
+      // Above the bottom bar of the main screen, not underneath it.
+      useRootNavigator: true,
+      useSafeArea: true,
       builder: (context) => FutureBuilder<List<BluetoothDevice>>(
-        future: listBluetoothDevices(),
+        future: bluetoothDevices(),
         builder: (context, snapshot) {
+          if (snapshot.error is BluetoothPermissionDenied) {
+            return const ListTile(
+              minTileHeight: 72,
+              leading: Icon(Icons.bluetooth_disabled),
+              title: Text('Нет доступа к Bluetooth'),
+              subtitle: Text(
+                'Разрешите приложению «Устройства поблизости» '
+                'в настройках системы',
+              ),
+            );
+          }
           if (snapshot.hasError) {
             return const ListTile(
               minTileHeight: 72,

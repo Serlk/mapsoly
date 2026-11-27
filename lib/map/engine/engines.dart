@@ -56,15 +56,21 @@ Widget buildMapView({
       visible: visible,
     );
   }
-  return Offstage(
-    offstage: !visible,
-    child: FlutterMapView(
-      controller: controller,
-      scene: scene,
-      initialCenter: initialCenter,
-      initialZoom: initialZoom,
-      onLongPress: onLongPress,
-      onCameraChanged: onCameraChanged,
+  // The box keeps its size while the map is offstage: an Offstage child is
+  // laid out as empty, and the screen's Stack takes its size from this
+  // view, so without it every section shown instead of the map would be
+  // squeezed to nothing.
+  return SizedBox.expand(
+    child: Offstage(
+      offstage: !visible,
+      child: FlutterMapView(
+        controller: controller,
+        scene: scene,
+        initialCenter: initialCenter,
+        initialZoom: initialZoom,
+        onLongPress: onLongPress,
+        onCameraChanged: onCameraChanged,
+      ),
     ),
   );
 }

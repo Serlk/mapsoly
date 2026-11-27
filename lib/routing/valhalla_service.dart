@@ -134,7 +134,8 @@ class RemoteValhallaBackend implements RoutingBackend {
 ///
 /// The binary is either upstream `valhalla_service` or `mapsoly_valhalla`
 /// (lib/routing/native/valhalla_shim.cc, used on Alpine where the package
-/// has no service binary); both take `<config.json> <threads>`.
+/// has no service binary, and on Android); both take
+/// `<config.json> <threads>`.
 class LocalValhallaBackend implements RoutingBackend {
   /// [dataDirectory] is a pack's `valhalla/` directory holding `tiles.tar`
   /// and `valhalla.json` as written by tool/build_routing.sh.
@@ -208,20 +209,39 @@ class LocalValhallaBackend implements RoutingBackend {
   /// Pid of the running server, for diagnostics.
   int? get pid => _process?.pid;
 
+  /// File name of the server on Android. It is an executable, but only files
+  /// named `lib*.so` get installed into the app's native library directory,
+  /// the one place an app may exec from (tool/build_valhalla_android.sh).
+  static const androidBinaryName = 'libmapsoly_valhalla.so';
+
   /// Finds the server binary:
   ///  1. `MAPSOLY_VALHALLA_BIN` environment variable,
-  ///  2. next to the app executable (`<bundle>/`, `<bundle>/lib/`,
+  ///  2. on Android, [androidBinaryName] in the app's native library
+  ///     directory (see [nativeLibraryDirFromMaps]),
+  ///  3. next to the app executable (`<bundle>/`, `<bundle>/lib/`,
   ///     `<bundle>/data/`), which is where a deploy script should put it,
-  ///  3. `$PATH`.
+  ///  4. `$PATH`.
   /// Returns null if there is none.
+  ///
+  /// [android] and [procMaps] default to the real platform and
+  /// `/proc/self/maps`; they are parameters for tests.
   static String? findBinary({
     Map<String, String>? environment,
     String? executable,
+    bool? android,
+    String? procMaps,
   }) {
     final env = environment ?? Platform.environment;
     final override = env['MAPSOLY_VALHALLA_BIN'];
     if (override != null && override.isNotEmpty) {
       return File(override).existsSync() ? override : null;
+    }
+    if (android ?? Platform.isAndroid) {
+      final libDir = nativeLibraryDirFromMaps(procMaps ?? _readProcMaps());
+      if (libDir != null) {
+        final file = File('$libDir/$androidBinaryName');
+        if (file.existsSync()) return file.path;
+      }
     }
     final exeDir = File(executable ?? Platform.resolvedExecutable).parent.path;
     final dirs = [
@@ -237,6 +257,37 @@ class LocalValhallaBackend implements RoutingBackend {
       }
     }
     return null;
+  }
+
+  /// The app's native library directory (`ApplicationInfo.nativeLibraryDir`)
+  /// worked out from the contents of `/proc/self/maps`: it is the directory
+  /// the Flutter engine or the AOT snapshot was loaded from. Asking Android
+  /// itself would need a platform channel, and this class has no engine
+  /// dependency otherwise.
+  ///
+  /// Returns null when the libraries were mapped straight from the APK
+  /// (`extractNativeLibs=false`); nothing can be executed in that case.
+  static String? nativeLibraryDirFromMaps(String maps) {
+    for (final line in const LineSplitter().convert(maps)) {
+      // address perms offset dev inode pathname
+      final slash = line.indexOf('/');
+      if (slash < 0) continue;
+      final path = line.substring(slash).trimRight();
+      for (final lib in const ['/libapp.so', '/libflutter.so']) {
+        if (path.endsWith(lib)) {
+          return path.substring(0, path.length - lib.length);
+        }
+      }
+    }
+    return null;
+  }
+
+  static String _readProcMaps() {
+    try {
+      return File('/proc/self/maps').readAsStringSync();
+    } on FileSystemException {
+      return '';
+    }
   }
 
   /// Rewrites a pack's `valhalla.json` for this run: absolute data paths,

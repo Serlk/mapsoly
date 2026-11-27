@@ -2,6 +2,20 @@
     <!-- Map tiles, traffic, map packs and online search. Without it a
          release build has no network at all. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- The position: satellites through the system's LocationManager.
+         Asked for at run time; "coarse" must accompany "fine" since
+         Android 12. Only while the app is on screen (no background
+         location). -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!-- ELM327 adapters over Bluetooth Classic: paired devices only, so no
+         scan permission. BLUETOOTH is the pre-Android 12 name. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <!-- None of these is required to install: the app is a map first. -->
+    <uses-feature android:name="android.hardware.location.gps" android:required="false"/>
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false"/>
+    <uses-feature android:name="android.hardware.sensor.compass" android:required="false"/>
     <application
         android:label="Mapsoly"
         android:name="${applicationName}"

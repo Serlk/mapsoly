@@ -136,6 +136,60 @@ void main() {
     });
   });
 
+  group('Android', () {
+    // Shape of /proc/self/maps in a release build with extracted libraries.
+    String maps(String libDir) =>
+        '12c00000-52c00000 rw-p 00000000 00:00 0                                  [anon:dalvik-main space]\n'
+        '7b1c8a2000-7b1c8a9000 r--p 00000000 fe:00 1234                           /apex/com.android.runtime/lib64/bionic/libc.so\n'
+        '7b0e400000-7b0e9d1000 r--p 00000000 fe:2c 5678                           $libDir/libflutter.so\n'
+        '7b0e9d1000-7b0f1f0000 r-xp 005d1000 fe:2c 5678                           $libDir/libflutter.so\n'
+        '7b0d000000-7b0d3a0000 r--p 00000000 fe:2c 5679                           $libDir/libapp.so\n'
+        '7ffd1000-7ffd3000 r-xp 00000000 00:00 0                                  [vdso]\n';
+
+    test('nativeLibraryDirFromMaps finds the directory of the engine', () {
+      const libDir =
+          '/data/app/~~AbC_d-1==/dev.mapsoly.mapsoly-xYz_2-3==/lib/arm64';
+      expect(
+        LocalValhallaBackend.nativeLibraryDirFromMaps(maps(libDir)),
+        libDir,
+      );
+      // A debug build has no libapp.so.
+      expect(
+        LocalValhallaBackend.nativeLibraryDirFromMaps(
+          '7b0e400000-7b0e9d1000 r-xp 00000000 fe:2c 5678 $libDir/libflutter.so',
+        ),
+        libDir,
+      );
+    });
+
+    test('nativeLibraryDirFromMaps is null without extracted libraries', () {
+      expect(
+        LocalValhallaBackend.nativeLibraryDirFromMaps(
+          '7b0e400000-7b0e9d1000 r-xp 00a51000 fe:2c 5678 '
+          '/data/app/~~AbC==/dev.mapsoly.mapsoly-xYz==/base.apk\n'
+          '7b1c8a2000-7b1c8a9000 r--p 00000000 fe:00 1234 /system/lib64/libmyapp.so\n',
+        ),
+        isNull,
+      );
+      expect(LocalValhallaBackend.nativeLibraryDirFromMaps(''), isNull);
+    });
+
+    test('findBinary looks in the native library directory', () {
+      final dir = Directory.systemTemp.createTempSync('mapsoly-find-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      String? find({bool android = true}) => LocalValhallaBackend.findBinary(
+        environment: const {'PATH': ''},
+        executable: '/system/bin/app_process64',
+        android: android,
+        procMaps: maps(dir.path),
+      );
+      expect(find(), isNull);
+      File('${dir.path}/libmapsoly_valhalla.so').writeAsStringSync('');
+      expect(find(), '${dir.path}/libmapsoly_valhalla.so');
+      expect(find(android: false), isNull);
+    });
+  });
+
   group('LocalValhallaBackend process lifecycle', () {
     final fake = File(
       'test/routing/fixtures/fake_valhalla_service.py',

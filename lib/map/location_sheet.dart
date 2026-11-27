@@ -11,6 +11,26 @@ const _sourceNames = {
   PositionSource.deadReckoning: 'счисление пути',
 };
 
+/// What stands between the app and the position, and the button that
+/// deals with it; null when nothing does.
+(String, String)? _accessProblem(LocationAccessState? state) => switch (state) {
+  LocationAccessState.denied => (
+    'Приложению не разрешён доступ к местоположению. Без него карта '
+        'работает, но не знает, где вы.',
+    'Разрешить',
+  ),
+  LocationAccessState.blocked => (
+    'Приложению не разрешён доступ к местоположению. Включите «Точное '
+        'местоположение» в разрешениях приложения.',
+    'Открыть настройки',
+  ),
+  LocationAccessState.switchedOff => (
+    'Определение местоположения выключено в системе.',
+    'Открыть настройки',
+  ),
+  _ => null,
+};
+
 /// Where the position comes from right now, plus the privacy-relevant
 /// switches: online lookups and wardriving.
 class LocationSheet extends StatelessWidget {
@@ -19,7 +39,18 @@ class LocationSheet extends StatelessWidget {
     required this.positioning,
     required this.settings,
     this.showTitle = true,
+    this.access,
+    this.radio = true,
   });
+
+  /// False where Wi-Fi and cell scans are not read (Android): there is
+  /// nothing to look up or to collect, so those lines and switches would
+  /// only confuse.
+  final bool radio;
+
+  /// Where the system asks the user before giving out the position: what
+  /// was answered. Null when there is nothing to ask.
+  final LocationAccess? access;
 
   /// False when the surrounding page already carries the title.
   final bool showTitle;
@@ -32,7 +63,7 @@ class LocationSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return ListenableBuilder(
-      listenable: Listenable.merge([positioning, settings]),
+      listenable: Listenable.merge([positioning, settings, access?.state]),
       builder: (context, _) {
         final status = positioning?.status;
         final fix = status?.estimate;
@@ -44,8 +75,12 @@ class LocationSheet extends StatelessWidget {
                 ? 'Местоположение пока не определено'
                 : 'Источник: ${_sourceNames[fix.source]}, '
                       'точность около ${fix.accuracyM.round()} м',
-            'Wi-Fi: видно ${status.wifiVisible}, известно ${status.wifiKnown}',
-            'Соты: видно ${status.cellsVisible}, известно ${status.cellsKnown}',
+            if (radio) ...[
+              'Wi-Fi: видно ${status.wifiVisible}, '
+                  'известно ${status.wifiKnown}',
+              'Соты: видно ${status.cellsVisible}, '
+                  'известно ${status.cellsKnown}',
+            ],
             status.gnssConnected
                 ? 'Спутники: в решении ${status.satellitesUsed} '
                       'из ${status.satellitesInView}'
@@ -79,25 +114,42 @@ class LocationSheet extends StatelessWidget {
                   padding: const EdgeInsets.fromLTRB(16, 2, 16, 2),
                   child: Text(line, style: theme.textTheme.bodyMedium),
                 ),
+              if (_accessProblem(access?.state.value) case final problem?)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(problem.$1, style: theme.textTheme.bodyMedium),
+                      const SizedBox(height: 8),
+                      FilledButton.tonal(
+                        onPressed: access!.request,
+                        child: Text(problem.$2),
+                      ),
+                    ],
+                  ),
+                ),
               const SizedBox(height: 8),
-              SwitchListTile(
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-                title: const Text('Уточнять онлайн'),
-                subtitle: const Text(
-                  'Неизвестные Wi-Fi и соты отправляются в beaconDB и Apple',
+              if (radio) ...[
+                SwitchListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                  title: const Text('Уточнять онлайн'),
+                  subtitle: const Text(
+                    'Неизвестные Wi-Fi и соты отправляются в beaconDB и Apple',
+                  ),
+                  value: settings.onlineLocation,
+                  onChanged: (v) => settings.onlineLocation = v,
                 ),
-                value: settings.onlineLocation,
-                onChanged: (v) => settings.onlineLocation = v,
-              ),
-              SwitchListTile(
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-                title: const Text('Собирать свою базу'),
-                subtitle: const Text(
-                  'Запоминать Wi-Fi и соты, пока спутники дают точную позицию',
+                SwitchListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                  title: const Text('Собирать свою базу'),
+                  subtitle: const Text(
+                    'Запоминать Wi-Fi и соты, пока спутники дают точную позицию',
+                  ),
+                  value: settings.wardriving,
+                  onChanged: (v) => settings.wardriving = v,
                 ),
-                value: settings.wardriving,
-                onChanged: (v) => settings.wardriving = v,
-              ),
+              ],
             ],
           ),
         );
