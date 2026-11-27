@@ -726,12 +726,12 @@ class RouteController extends ChangeNotifier {
     }
   }
 
-  /// Roads around [p] from the installed routing graph (for the speed
-  /// limit); null when there is none.
-  Future<List<NearbyEdge>?> nearbyEdges(LatLng p) async {
+  /// The road driven from [from] to [to], from the installed routing
+  /// graph (for the speed limit); null when there is none.
+  Future<DrivenEdge?> drivenEdge(LatLng from, LatLng to) async {
     if (!available || _disposed) return null;
     final client = await _client();
-    return client.nearbyEdges(p);
+    return client.drivenEdge(from, to);
   }
 
   Future<ValhallaClient> _client() async {

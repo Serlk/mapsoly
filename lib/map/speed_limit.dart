@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 import 'package:latlong2/latlong.dart';
 
@@ -9,84 +11,120 @@ double headingDifference(double a, double b) {
   return d > 180 ? 360 - d : d;
 }
 
-/// The road the car is most likely on: the nearest of those that run the
-/// way the car is heading. Without a heading, simply the nearest.
-NearbyEdge? pickDrivenEdge(
-  List<NearbyEdge> edges, {
-  double? headingDeg,
-  double toleranceDeg = 40,
-}) {
-  NearbyEdge? best;
-  for (final e in edges) {
-    if (headingDeg != null &&
-        headingDifference(e.headingDeg, headingDeg) > toleranceDeg) {
-      continue;
-    }
-    if (best == null || e.distanceM < best.distanceM) best = e;
-  }
-  return best;
+/// A speed limit for the road being driven.
+@immutable
+class RoadLimit {
+  const RoadLimit(this.kmh, {this.posted = true});
+
+  final int kmh;
+
+  /// True when the limit is in the map data; false when it is the general
+  /// rule for this kind of road, which a sign on the spot may override.
+  final bool posted;
+
+  @override
+  bool operator ==(Object other) =>
+      other is RoadLimit && other.kmh == kmh && other.posted == posted;
+
+  @override
+  int get hashCode => Object.hash(kmh, posted);
+
+  @override
+  String toString() => 'RoadLimit($kmh${posted ? '' : ', by rule'})';
 }
 
-/// Looks up the roads around a point; null when routing data is missing.
-typedef NearbyEdgesLookup = Future<List<NearbyEdge>?> Function(LatLng point);
+/// The limit of [edge]: the mapped one, or else the general rule of the
+/// Russian traffic code — 60 in built-up areas, 20 in living streets, 110
+/// on motorways and 90 on other roads outside towns. Most city streets
+/// carry no limit in OpenStreetMap precisely because the rule applies.
+///
+/// Null for driveways, parking aisles and the like, and when nothing is
+/// known about the road.
+RoadLimit? limitOf(DrivenEdge edge) {
+  final posted = edge.speedLimitKmh;
+  if (posted != null) return RoadLimit(posted);
+  if (edge.use == 'living_street') return const RoadLimit(20, posted: false);
+  if (edge.use != 'road' && edge.use != 'ramp' && edge.use != 'turn_channel') {
+    return null;
+  }
+  final cls = edge.roadClass;
+  if (cls == null || cls == 'service_other') return null;
+  final density = edge.density;
+  if (density == null) return null;
+  // Valhalla's own line between rural and urban roads.
+  if (density > 8) return const RoadLimit(60, posted: false);
+  return RoadLimit(cls == 'motorway' ? 110 : 90, posted: false);
+}
+
+/// The point [metres] behind [p] for a car heading [headingDeg].
+LatLng pointBehind(LatLng p, double headingDeg, double metres) {
+  final h = headingDeg * math.pi / 180;
+  const mPerDeg = 111320.0;
+  final cosLat = math.cos(p.latitude * math.pi / 180);
+  return LatLng(
+    p.latitude - metres * math.cos(h) / mPerDeg,
+    p.longitude - metres * math.sin(h) / (mPerDeg * cosLat),
+  );
+}
+
+/// Finds the road driven between two points; null when there is no
+/// routing data or no road there.
+typedef DrivenEdgeLookup = Future<DrivenEdge?> Function(LatLng from, LatLng to);
 
 /// Keeps the speed limit of the road being driven, asking the routing
 /// graph of the installed maps again every few dozen metres.
-///
-/// Only limits that are in the map data are shown: a guess from the road
-/// class would look just as certain on the screen and be wrong too often.
 class SpeedLimitTracker extends ChangeNotifier {
   SpeedLimitTracker(this._lookup);
 
-  final NearbyEdgesLookup _lookup;
+  final DrivenEdgeLookup _lookup;
 
   /// A new lookup after the car moved this far or turned this much.
   static const stepM = 25.0, turnDeg = 25.0;
 
   /// A limit stays on screen this far past the last road that had one
-  /// (junctions and gaps in the data), then goes away.
+  /// (junctions, a short gap in matching), then goes away.
   static const keepM = 120.0;
+
+  /// Length of the stretch behind the car that is matched to a road.
+  static const traceM = 30.0;
 
   static const _distance = Distance();
 
-  int? _limit;
+  RoadLimit? _limit;
   LatLng? _asked, _confirmed;
   double? _askedHeading;
   bool _busy = false;
   bool _disposed = false;
 
-  /// Limit of the current road in km/h, or null when unknown.
-  int? get limitKmh => _limit;
+  /// Limit of the current road, or null when unknown.
+  RoadLimit? get limit => _limit;
 
   /// Feeds the position and the direction of travel. Call it only while
   /// moving: standing still the heading means nothing.
   void update(LatLng p, double? headingDeg) {
-    if (_busy) return;
+    if (_busy || headingDeg == null) return;
     final asked = _asked;
     if (asked != null &&
         _distance.as(LengthUnit.Meter, asked, p) < stepM &&
-        (headingDeg == null ||
-            _askedHeading == null ||
+        (_askedHeading == null ||
             headingDifference(headingDeg, _askedHeading!) < turnDeg)) {
       return;
     }
     _asked = p;
     _askedHeading = headingDeg;
     _busy = true;
-    _lookup(p)
-        .then((edges) => _apply(p, headingDeg, edges))
+    _lookup(pointBehind(p, headingDeg, traceM), p)
+        .then((edge) => _apply(p, edge))
         .catchError((Object e) {
           debugPrint('Speed limit lookup failed: $e');
         })
         .whenComplete(() => _busy = false);
   }
 
-  void _apply(LatLng p, double? headingDeg, List<NearbyEdge>? edges) {
+  void _apply(LatLng p, DrivenEdge? edge) {
     if (_disposed) return;
-    final found = edges == null
-        ? null
-        : pickDrivenEdge(edges, headingDeg: headingDeg)?.speedLimitKmh;
-    int? next;
+    final found = edge == null ? null : limitOf(edge);
+    RoadLimit? next;
     if (found != null) {
       _confirmed = p;
       next = found;

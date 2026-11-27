@@ -476,43 +476,41 @@ class SnappedPoint {
   final Map<String, dynamic> raw;
 }
 
-/// One direction of a road near a point (verbose `/locate`).
-class NearbyEdge {
-  const NearbyEdge({
-    required this.distanceM,
-    required this.headingDeg,
+/// The road being driven, from `/trace_attributes`.
+class DrivenEdge {
+  const DrivenEdge({
     required this.speedLimitKmh,
+    required this.density,
     required this.roadClass,
+    required this.use,
   });
 
-  /// Distance from the requested point to the road.
-  final double distanceM;
-
-  /// Direction of travel at the nearest point, degrees clockwise from
-  /// north.
-  final double headingDeg;
+  factory DrivenEdge.fromJson(Map<String, dynamic> json) {
+    final limit = json['speed_limit'];
+    return DrivenEdge(
+      // Absent or 0 is "not mapped", 255 is Valhalla's "unlimited".
+      speedLimitKmh: limit is num && limit > 0 && limit < 255
+          ? limit.round()
+          : null,
+      density: (json['density'] as num?)?.toInt(),
+      roadClass: json['road_class'] as String?,
+      use: json['use'] as String?,
+    );
+  }
 
   /// Posted limit from the map data; null when it is not mapped or the
   /// road has none.
   final int? speedLimitKmh;
+
+  /// How built-up the surroundings are, 0 (open country) to 15 (dense
+  /// city); null when unknown.
+  final int? density;
+
+  /// "motorway", "trunk", "primary", ... "service_other".
   final String? roadClass;
 
-  static NearbyEdge? tryParse(Map<String, dynamic> json) {
-    final distance = json['distance'], heading = json['heading'];
-    if (distance is! num || heading is! num) return null;
-    final info = json['edge_info'], edge = json['edge'];
-    final limit = info is Map ? info['speed_limit'] : null;
-    final cls = edge is Map ? edge['classification'] : null;
-    return NearbyEdge(
-      distanceM: distance.toDouble(),
-      headingDeg: heading.toDouble(),
-      // 0 is "not mapped", 255 is Valhalla's "unlimited".
-      speedLimitKmh: limit is num && limit > 0 && limit < 255
-          ? limit.round()
-          : null,
-      roadClass: cls is Map ? cls['classification'] as String? : null,
-    );
-  }
+  /// "road", "ramp", "living_street", "driveway", ...
+  final String? use;
 }
 
 /// An error reported by Valhalla (HTTP 4xx/5xx with a JSON body).

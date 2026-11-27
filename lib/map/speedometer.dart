@@ -79,11 +79,16 @@ class Speedometer extends StatelessWidget {
     super.key,
     required this.speedKmh,
     this.limitKmh,
+    this.limitPosted = true,
     this.signFirst = false,
   });
 
   final double speedKmh;
   final int? limitKmh;
+
+  /// False when the limit is the general rule for this kind of road and
+  /// not a mapped sign: the sign is then drawn paler.
+  final bool limitPosted;
 
   /// The sign to the left of the speed: for the right edge of the screen,
   /// where the speed itself keeps the corner.
@@ -118,7 +123,7 @@ class Speedometer extends StatelessWidget {
             if (limit != null && signFirst)
               Padding(
                 padding: const EdgeInsets.only(right: 6),
-                child: SpeedLimitSign(limitKmh: limit),
+                child: SpeedLimitSign(limitKmh: limit, posted: limitPosted),
               ),
             AnimatedContainer(
               duration: const Duration(milliseconds: 200),
@@ -174,7 +179,7 @@ class Speedometer extends StatelessWidget {
             if (limit != null && !signFirst)
               Padding(
                 padding: const EdgeInsets.only(left: 6),
-                child: SpeedLimitSign(limitKmh: limit),
+                child: SpeedLimitSign(limitKmh: limit, posted: limitPosted),
               ),
           ],
         ),
@@ -189,10 +194,15 @@ class SpeedLimitSign extends StatelessWidget {
   const SpeedLimitSign({
     super.key,
     required this.limitKmh,
+    this.posted = true,
     this.size = Speedometer.signSize,
   });
 
   final int limitKmh;
+
+  /// A mapped limit has the full red ring; one that follows from the
+  /// general rule (no sign in the map data) a paler one.
+  final bool posted;
   final double size;
 
   @override
@@ -204,7 +214,10 @@ class SpeedLimitSign extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white,
         shape: BoxShape.circle,
-        border: Border.all(color: const Color(0xFFD32F2F), width: size * 0.11),
+        border: Border.all(
+          color: posted ? const Color(0xFFD32F2F) : const Color(0xFFE39A9A),
+          width: size * 0.11,
+        ),
         boxShadow: const [
           BoxShadow(
             color: Color(0x33000000),

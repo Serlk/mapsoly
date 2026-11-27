@@ -61,6 +61,28 @@ static FlMethodResponse* handles(FlView* view) {
   return FL_METHOD_RESPONSE(fl_method_success_response_new(result));
 }
 
+// Keeps the screen on while the driver follows the map: an idle inhibitor on
+// the window, which on Wayland GTK turns into zwp_idle_inhibitor_v1.
+static guint keep_awake_cookie = 0;
+
+static void keep_awake(FlView* view, gboolean on) {
+  GtkWidget* toplevel = gtk_widget_get_toplevel(GTK_WIDGET(view));
+  if (!GTK_IS_WINDOW(toplevel)) {
+    return;
+  }
+  GtkApplication* app = gtk_window_get_application(GTK_WINDOW(toplevel));
+  if (app == nullptr) {
+    return;
+  }
+  if (on && keep_awake_cookie == 0) {
+    keep_awake_cookie = gtk_application_inhibit(
+        app, GTK_WINDOW(toplevel), GTK_APPLICATION_INHIBIT_IDLE, "Navigation");
+  } else if (!on && keep_awake_cookie != 0) {
+    gtk_application_uninhibit(app, keep_awake_cookie);
+    keep_awake_cookie = 0;
+  }
+}
+
 static void method_call_cb(FlMethodChannel* channel,
                            FlMethodCall* call,
                            gpointer user_data) {
@@ -73,6 +95,13 @@ static void method_call_cb(FlMethodChannel* channel,
     // Subsurface position and stacking take effect when the parent commits.
     gtk_widget_queue_draw(gtk_widget_get_toplevel(GTK_WIDGET(view)));
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+  } else if (g_strcmp0(method, "keepAwake") == 0) {
+    FlValue* args = fl_method_call_get_args(call);
+    keep_awake(view, args != nullptr &&
+                         fl_value_get_type(args) == FL_VALUE_TYPE_BOOL &&
+                         fl_value_get_bool(args));
+    response = FL_METHOD_RESPONSE(
+        fl_method_success_response_new(fl_value_new_bool(keep_awake_cookie != 0)));
   } else {
     response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
   }

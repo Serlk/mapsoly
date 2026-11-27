@@ -454,7 +454,7 @@ void main() {
             SizedBox(height: 12),
             Speedometer(speedKmh: 58, limitKmh: 60),
             SizedBox(height: 12),
-            Speedometer(speedKmh: 72, limitKmh: 60),
+            Speedometer(speedKmh: 72, limitKmh: 60, limitPosted: false),
             SizedBox(height: 12),
             Speedometer(speedKmh: 127, limitKmh: 100),
           ],

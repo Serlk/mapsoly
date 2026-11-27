@@ -4,12 +4,13 @@ import 'package:mapsoly/map/speed_limit.dart';
 import 'package:mapsoly/map/speedometer.dart';
 import 'package:mapsoly/routing/route_models.dart';
 
-NearbyEdge edge(double distance, double heading, int? limit) => NearbyEdge(
-  distanceM: distance,
-  headingDeg: heading,
-  speedLimitKmh: limit,
-  roadClass: 'primary',
-);
+DrivenEdge edge({int? limit, int? density = 15, String cls = 'primary'}) =>
+    DrivenEdge(
+      speedLimitKmh: limit,
+      density: density,
+      roadClass: cls,
+      use: 'road',
+    );
 
 void main() {
   final t0 = DateTime.utc(2026, 11, 27, 9);
@@ -54,32 +55,54 @@ void main() {
     expect(speedingOf(81, 60), Speeding.far);
   });
 
-  test('the driven road is the nearest one going our way', () {
-    final edges = [
-      edge(4, 270, 40), // the side street crossing here
-      edge(9, 92, 60), // our carriageway
-      edge(9, 272, 80), // the opposite one
-    ];
-    expect(pickDrivenEdge(edges, headingDeg: 90)!.speedLimitKmh, 60);
-    expect(pickDrivenEdge(edges, headingDeg: 355), isNull);
-    expect(pickDrivenEdge(edges)!.speedLimitKmh, 40);
+  test('the limit of a road: mapped, or the general rule', () {
+    expect(limitOf(edge(limit: 40)), const RoadLimit(40));
+    // A city street without a mapped limit: 60 by rule.
+    expect(limitOf(edge()), const RoadLimit(60, posted: false));
+    expect(limitOf(edge(density: 3)), const RoadLimit(90, posted: false));
+    expect(
+      limitOf(edge(density: 3, cls: 'motorway')),
+      const RoadLimit(110, posted: false),
+    );
+    expect(
+      limitOf(
+        const DrivenEdge(
+          speedLimitKmh: null,
+          density: 15,
+          roadClass: 'residential',
+          use: 'living_street',
+        ),
+      ),
+      const RoadLimit(20, posted: false),
+    );
+    // Yards and car parks: nothing to show.
+    expect(limitOf(edge(cls: 'service_other')), isNull);
+    expect(limitOf(edge(density: null)), isNull);
     expect(headingDifference(350, 10), 20);
   });
 
-  test('verbose locate edges: 0 and 255 are not limits', () {
-    Map<String, dynamic> json(Object? limit) => {
-      'distance': 3.5,
-      'heading': 181,
-      'edge_info': {'speed_limit': limit},
-      'edge': {
-        'classification': {'classification': 'trunk'},
-      },
-    };
-    expect(NearbyEdge.tryParse(json(100))!.speedLimitKmh, 100);
-    expect(NearbyEdge.tryParse(json(100))!.roadClass, 'trunk');
-    expect(NearbyEdge.tryParse(json(0))!.speedLimitKmh, isNull);
-    expect(NearbyEdge.tryParse(json(255))!.speedLimitKmh, isNull);
-    expect(NearbyEdge.tryParse({'edge_info': <String, dynamic>{}}), isNull);
+  test('trace attributes: absent, 0 and 255 are not limits', () {
+    DrivenEdge parse(Object? limit) => DrivenEdge.fromJson({
+      'speed_limit': ?limit,
+      'density': 15,
+      'road_class': 'trunk',
+      'use': 'road',
+    });
+    expect(parse(100).speedLimitKmh, 100);
+    expect(parse(100).roadClass, 'trunk');
+    expect(parse(null).speedLimitKmh, isNull);
+    expect(parse(0).speedLimitKmh, isNull);
+    expect(parse(255).speedLimitKmh, isNull);
+  });
+
+  test('the matched stretch lies behind the car', () {
+    final p = pointBehind(const LatLng(55.75, 37.6), 90, 30);
+    expect(p.latitude, closeTo(55.75, 1e-6));
+    expect(p.longitude, lessThan(37.6));
+    expect(
+      const Distance().as(LengthUnit.Meter, p, const LatLng(55.75, 37.6)),
+      closeTo(30, 1),
+    );
   });
 
   group('SpeedLimitTracker', () {
@@ -87,50 +110,54 @@ void main() {
     LatLng p(int step) => LatLng(55.75 + step * 0.0001, 37.6);
 
     test('asks every few dozen metres and keeps a limit over gaps', () async {
-      var answer = <NearbyEdge>[edge(2, 0, 60)];
+      DrivenEdge? answer = edge(limit: 60);
       var asked = 0;
-      final tracker = SpeedLimitTracker((_) async {
+      final tracker = SpeedLimitTracker((from, to) async {
         asked++;
+        expect(from.latitude, lessThan(to.latitude));
         return answer;
       });
       addTearDown(tracker.dispose);
+      // Without a direction there is nothing to match.
+      tracker.update(p(0), null);
+      await pumpEventQueue();
+      expect(asked, 0);
       tracker.update(p(0), 0);
       await pumpEventQueue();
-      expect(tracker.limitKmh, 60);
+      expect(tracker.limit, const RoadLimit(60));
       // Too close to ask again.
       tracker.update(p(1), 0);
       await pumpEventQueue();
       expect(asked, 1);
-      // A stretch without a mapped limit: the last one stays for a while.
-      answer = [edge(2, 0, null)];
+      // No road matched for a moment: the last limit stays for a while.
+      answer = null;
       tracker.update(p(4), 0);
       await pumpEventQueue();
       expect(asked, 2);
-      expect(tracker.limitKmh, 60);
-      tracker.update(p(14), 0);
+      expect(tracker.limit, const RoadLimit(60));
+      tracker.update(p(16), 0);
       await pumpEventQueue();
-      expect(tracker.limitKmh, isNull);
-      // A turn asks again at once.
-      answer = [edge(2, 90, 40)];
-      tracker.update(p(14), 90);
+      expect(tracker.limit, isNull);
+      // A street without a mapped limit: the rule, marked as such.
+      answer = edge();
+      tracker.update(p(20), 0);
       await pumpEventQueue();
-      expect(tracker.limitKmh, 40);
+      expect(tracker.limit, const RoadLimit(60, posted: false));
     });
 
-    test('no routing data or a failing lookup: no limit, no crash', () async {
-      final none = SpeedLimitTracker((_) async => null);
-      addTearDown(none.dispose);
-      none.update(p(0), 0);
-      await pumpEventQueue();
-      expect(none.limitKmh, isNull);
-      final broken = SpeedLimitTracker((_) async => throw Exception('down'));
+    test('a failing lookup: no limit, no crash, asks again', () async {
+      var asked = 0;
+      final broken = SpeedLimitTracker((_, _) async {
+        asked++;
+        throw Exception('down');
+      });
       addTearDown(broken.dispose);
       broken.update(p(0), 0);
       await pumpEventQueue();
-      expect(broken.limitKmh, isNull);
-      // It asks again later.
+      expect(broken.limit, isNull);
       broken.update(p(5), 0);
       await pumpEventQueue();
+      expect(asked, 2);
     });
   });
 }

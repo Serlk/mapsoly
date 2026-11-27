@@ -239,33 +239,40 @@ class ValhallaClient {
     );
   }
 
-  /// Roads within [radiusM] of [point], both directions of each, with the
-  /// posted speed limit where the map data has one.
-  Future<List<NearbyEdge>> nearbyEdges(
-    LatLng point, {
-    double radiusM = 40,
+  /// The road a car is on, given two points it just passed ([from] then
+  /// [to], a few dozen metres apart): map-matched, so the carriageway and
+  /// direction are the driven ones. Null when no road matches.
+  Future<DrivenEdge?> drivenEdge(
+    LatLng from,
+    LatLng to, {
     RouteCosting costing = RouteCosting.auto,
   }) async {
-    final json = await _postAny('locate', {
-      'locations': [
-        {
-          'lat': point.latitude,
-          'lon': point.longitude,
-          'radius': radiusM.round(),
+    final Map<String, dynamic> json;
+    try {
+      json = await _post('trace_attributes', {
+        'shape': [
+          {'lat': from.latitude, 'lon': from.longitude},
+          {'lat': to.latitude, 'lon': to.longitude},
+        ],
+        'costing': costing.name,
+        'shape_match': 'map_snap',
+        'filters': {
+          'action': 'include',
+          'attributes': [
+            'edge.speed_limit',
+            'edge.density',
+            'edge.road_class',
+            'edge.use',
+          ],
         },
-      ],
-      'costing': costing.name,
-      'verbose': true,
-    });
-    if (json is! List || json.isEmpty) return const [];
-    final first = json.first;
-    if (first is! Map<String, dynamic>) return const [];
-    final edges = first['edges'];
-    if (edges is! List) return const [];
-    return [
-      for (final e in edges)
-        if (e is Map<String, dynamic>) ?NearbyEdge.tryParse(e),
-    ];
+      });
+    } on ValhallaException {
+      return null; // nothing to match here
+    }
+    final edges = json['edges'];
+    if (edges is! List || edges.isEmpty) return null;
+    final last = edges.last;
+    return last is Map<String, dynamic> ? DrivenEdge.fromJson(last) : null;
   }
 
   /// Asks the backend for its version. Throws if it is not reachable.

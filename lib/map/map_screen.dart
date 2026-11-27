@@ -27,6 +27,7 @@ import 'drive_camera.dart';
 import 'engine/engines.dart';
 import 'engine/map_engine.dart';
 import 'guidance.dart';
+import 'keep_awake.dart';
 import 'location_sheet.dart';
 import 'point_picker.dart';
 import 'route_controller.dart';
@@ -153,9 +154,10 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
 
   // Speed, the limit of the road, and the controls that hide on the move.
   late final SpeedLimitTracker _speedLimit = SpeedLimitTracker(
-    _route.nearbyEdges,
+    _route.drivenEdge,
   );
   final _chrome = DriveChrome();
+  final _keepAwake = KeepAwake();
   Timer? _chromeTimer;
   Offset? _pointerDownAt;
   bool _cruising = false;
@@ -192,6 +194,20 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     if (wasHidden) setState(() {});
   }
 
+  /// The limit for the sign next to the speed: the one mapped on the
+  /// road; else the limit of the camera being approached, which is what
+  /// will be enforced; else the general rule for this kind of road.
+  RoadLimit? get _limit {
+    final road = _speedLimit.limit;
+    if (road != null && road.posted) return road;
+    final camera = _route.nextCamera?.camera.maxSpeedKmh;
+    final distance = _route.nextCameraDistanceM;
+    if (camera != null && distance != null && distance < 700) {
+      return RoadLimit(camera);
+    }
+    return road;
+  }
+
   /// Speed known right now, km/h.
   double? get _speedKmh {
     final fromRoute = _route.speedKmh;
@@ -224,6 +240,8 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     _chrome.update(speed, DateTime.now());
     // The bottom bar is not rebuilt with the route, so say it out loud.
     if (_chromeHidden != wasHidden) _rebuild();
+    // On the dashboard the screen stays on: while guided, and while moving.
+    _keepAwake.set(_route.guiding || _chrome.moving);
     final progress = _route.progress;
     // Moving without a route: the map still goes 3D, unless switched off.
     final cruising = _chrome.moving && progress == null;
@@ -412,6 +430,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     _saveCamera?.cancel();
     _confirmEndTimer?.cancel();
     _chromeTimer?.cancel();
+    _keepAwake.set(false);
     _speedLimit.dispose();
     _downloads?.dispose();
     _pick?.completer.complete(null);
@@ -1068,7 +1087,8 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
         speed != null && !showsCard && (_route.progress != null || speed >= 5)
         ? Speedometer(
             speedKmh: speed,
-            limitKmh: _speedLimit.limitKmh,
+            limitKmh: _limit?.kmh,
+            limitPosted: _limit?.posted ?? true,
             signFirst: true,
           )
         : null;
