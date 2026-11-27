@@ -9,7 +9,7 @@ import 'package:mapsoly/settings.dart';
 
 /// Downloads a real pack from the map server and checks what lands on disk.
 /// Opt-in (network, ~110 MB): run with MAPSOLY_LIVE_PACK=crimean and
-/// MAPSOLY_LIVE_DIR=<empty folder>.
+/// `MAPSOLY_LIVE_DIR` pointing at an empty folder.
 void main() {
   final id = Platform.environment['MAPSOLY_LIVE_PACK'];
   final dir = Platform.environment['MAPSOLY_LIVE_DIR'];
