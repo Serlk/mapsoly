@@ -1,83 +1,131 @@
 package dev.mapsoly.mapsoly
 
-import android.content.Context
+import android.app.Activity
 import android.os.Handler
 import android.os.Looper
+import android.view.Gravity
 import android.view.Surface
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import io.flutter.embedding.android.FlutterActivity
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
-import io.flutter.view.TextureRegistry
 import java.io.File
 import java.util.zip.ZipInputStream
 import kotlin.concurrent.thread
 
 /**
  * The Android half of the MapLibre map engine (docs/map-engine.md, "Android"): the
- * Flutter textures the native map draws into, and the map's offline glyphs and sprites.
+ * surfaces the native map draws into, and the map's offline glyphs and sprites.
  *
  * The map itself is created and driven from Dart through dart:ffi
  * (libmapsoly_mln.so, native/maplibre/mlnb.h). This class only owns what needs the
- * Android framework: a `SurfaceProducer` per map view, whose `Surface` is handed to Dart
- * as an `ANativeWindow` pointer. Android takes that surface away while the app is in the
- * background and after a resize; the native library is told first (it stops drawing
- * into the window before the call returns), Dart afterwards.
+ * Android framework: a `SurfaceView` per map view, placed in the activity's content
+ * view *below* the Flutter view, which is transparent (MainActivity) and leaves a hole
+ * where the map is. SurfaceFlinger puts the two together; Flutter never sees the map's
+ * pixels. The view takes no input: it lies under the Flutter view, which gets every
+ * touch.
+ *
+ * The view's `Surface` is handed to Dart as an `ANativeWindow` pointer. Its buffers
+ * have a fixed size of their own (`SurfaceHolder.setFixedSize`), which may be smaller
+ * than the view: the display then scales the picture up. Android takes the surface
+ * away while the app is in the background; the native library is told first (it stops
+ * drawing into the window before the call returns), Dart afterwards.
  *
  * Channel `mapsoly/map_surface`:
  *  - `assets` -> directory with `fonts/` and `sprites/` (unpacked from the APK once per
  *    installed version), or an error when the APK has none;
- *  - `create` -> texture id;
- *  - `resize` {texture, width, height} -> window handle for that size (0: none now);
- *  - `dispose` texture id;
- *  - to Dart: `surface` {texture, window}: the texture has a new window (0: none).
+ *  - `create` -> surface id;
+ *  - `place` {surface, x, y, width, height, bufferWidth, bufferHeight}: where the view
+ *    lies (pixels of the screen, relative to the Flutter view) and the size of its
+ *    buffers;
+ *  - `dispose` surface id;
+ *  - to Dart: `surface` {surface, window, width, height}: the surface has a window with
+ *    buffers of that size (window 0: none at the moment).
  */
 class MapSurface(
-    private val context: Context,
-    private val textures: TextureRegistry,
+    private val activity: Activity,
     messenger: BinaryMessenger,
 ) : MethodChannel.MethodCallHandler {
     private val channel = MethodChannel(messenger, "mapsoly/map_surface")
     private val main = Handler(Looper.getMainLooper())
     private val entries = HashMap<Long, Entry>()
+    private var nextId = 1L
 
     init {
         channel.setMethodCallHandler(this)
     }
 
-    private inner class Entry(val producer: TextureRegistry.SurfaceProducer) :
-        TextureRegistry.SurfaceProducer.Callback {
-        var surface: Surface? = null
+    private inner class Entry(val id: Long) : SurfaceHolder.Callback {
+        // Default Z order: below the window, which gets a hole where the view is; the
+        // Flutter view's own surface is above the window.
+        val view = SurfaceView(activity).apply {
+            isFocusable = false
+            isClickable = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
         var window = 0L
 
-        /** The producer's current surface as a native window; the same one while it lasts. */
-        fun acquire(): Long {
-            val current = producer.surface
-            if (current === surface && window != 0L) return window
-            drop()
-            surface = current
-            window = if (current.isValid) nativeAcquire(current) else 0L
-            return window
+        init {
+            view.holder.addCallback(this)
         }
 
-        /** Takes the map off the window before Android destroys it. */
+        fun place(x: Int, y: Int, width: Int, height: Int, bufferWidth: Int, bufferHeight: Int) {
+            val flutter = activity.findViewById<View>(FlutterActivity.FLUTTER_VIEW_ID)
+            val container = flutter?.parent as? ViewGroup ?: return
+            val params = FrameLayout.LayoutParams(width, height, Gravity.TOP or Gravity.LEFT).apply {
+                leftMargin = flutter.left + x
+                topMargin = flutter.top + y
+            }
+            // Before the layout: the surface is then made with these buffers at once.
+            view.holder.setFixedSize(bufferWidth, bufferHeight)
+            if (view.parent == null) {
+                container.addView(view, 0, params) // first child: behind the Flutter view
+            } else {
+                view.layoutParams = params
+            }
+        }
+
+        /** Takes the map off the window before Android destroys or changes it. */
         fun drop() {
             if (window != 0L) nativeRelease(window)
             window = 0L
-            surface = null
         }
 
-        override fun onSurfaceAvailable() {
-            // Back on screen: a new surface of the size set last.
-            if (producer.width > 0 && producer.height > 0) announce(acquire())
-        }
-
-        override fun onSurfaceCleanup() {
+        fun remove() {
+            view.holder.removeCallback(this)
             drop()
-            announce(0L)
+            (view.parent as? ViewGroup)?.removeView(view)
         }
 
-        private fun announce(window: Long) {
-            channel.invokeMethod("surface", mapOf("texture" to producer.id(), "window" to window))
+        override fun surfaceCreated(holder: SurfaceHolder) {
+            // surfaceChanged always follows, with the size.
+        }
+
+        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+            // Also after a change of the buffers' size: the map starts on the window
+            // anew, so it never draws with a size the window no longer has.
+            drop()
+            val surface: Surface? = holder.surface
+            window = if (surface != null && surface.isValid) nativeAcquire(surface) else 0L
+            announce(window, width, height)
+        }
+
+        override fun surfaceDestroyed(holder: SurfaceHolder) {
+            // The app left the screen (or the view is going away).
+            drop()
+            announce(0L, 0, 0)
+        }
+
+        private fun announce(window: Long, width: Int, height: Int) {
+            channel.invokeMethod(
+                "surface",
+                mapOf("surface" to id, "window" to window, "width" to width, "height" to height),
+            )
         }
     }
 
@@ -89,34 +137,30 @@ class MapSurface(
                     result.error("unavailable", "libmapsoly_mln.so cannot be loaded", null)
                     return
                 }
-                // Reset in the background: after a pause the map gets a fresh surface
-                // and repaints, instead of trusting buffers that outlived it.
-                val producer = textures.createSurfaceProducer(TextureRegistry.SurfaceLifecycle.resetInBackground)
-                val entry = Entry(producer)
-                producer.setCallback(entry)
-                entries[producer.id()] = entry
-                result.success(producer.id())
+                val entry = Entry(nextId++)
+                entries[entry.id] = entry
+                result.success(entry.id)
             }
-            "resize" -> {
-                val entry = entries[(call.argument<Number>("texture") ?: -1).toLong()]
+            "place" -> {
+                val entry = entries[(call.argument<Number>("surface") ?: -1).toLong()]
                 val width = call.argument<Int>("width") ?: 0
                 val height = call.argument<Int>("height") ?: 0
-                if (entry == null || width < 1 || height < 1) {
-                    result.success(0L)
-                    return
+                val bufferWidth = call.argument<Int>("bufferWidth") ?: 0
+                val bufferHeight = call.argument<Int>("bufferHeight") ?: 0
+                if (entry != null && width > 0 && height > 0 && bufferWidth > 0 && bufferHeight > 0) {
+                    entry.place(
+                        call.argument<Int>("x") ?: 0,
+                        call.argument<Int>("y") ?: 0,
+                        width,
+                        height,
+                        bufferWidth,
+                        bufferHeight,
+                    )
                 }
-                if (entry.producer.width != width || entry.producer.height != height) {
-                    // A producer of another size has another surface: let go of the old one.
-                    entry.drop()
-                    entry.producer.setSize(width, height)
-                }
-                result.success(entry.acquire())
+                result.success(null)
             }
             "dispose" -> {
-                entries.remove((call.arguments as Number).toLong())?.let {
-                    it.drop()
-                    it.producer.release()
-                }
+                entries.remove((call.arguments as Number).toLong())?.remove()
                 result.success(null)
             }
             else -> result.notImplemented()
@@ -126,10 +170,7 @@ class MapSurface(
     /** Flutter is going away: no surface may outlive it. */
     fun release() {
         channel.setMethodCallHandler(null)
-        for (entry in entries.values) {
-            entry.drop()
-            entry.producer.release()
-        }
+        for (entry in entries.values) entry.remove()
         entries.clear()
     }
 
@@ -141,6 +182,7 @@ class MapSurface(
     private fun unpackAssets(result: MethodChannel.Result) {
         thread(name = "map-assets") {
             val outcome = runCatching {
+                val context = activity.applicationContext
                 val info = context.packageManager.getPackageInfo(context.packageName, 0)
                 val stamp = "${info.lastUpdateTime}"
                 val dir = File(context.filesDir, "maplibre")

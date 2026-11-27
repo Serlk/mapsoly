@@ -23,10 +23,10 @@ The background (why MapLibre, why this way of embedding, measurements) is in
 
 ## How the MapLibre engine works
 
-This section describes Linux. Scene, style, camera, gestures and the tile server are the
-same code on Android; where the map is drawn and how it gets on screen differs, see
-[Android](#android). That difference sits behind `MapSurface`
-(`maplibre/surface.dart`: `WaylandMapSurface`, `AndroidMapSurface`).
+This section describes Linux. Scene, style, camera, gestures, the tile server, the hole in
+Flutter's picture and the blur regions are the same code on Android; which surface the map
+is drawn into and how it is placed differs, see [Android](#android). That difference sits
+behind `MapSurface` (`maplibre/surface.dart`: `WaylandMapSurface`, `AndroidMapSurface`).
 
 ```
  Flutter window (GTK, transparent)        <- cards, buttons, sheets: ordinary widgets
@@ -175,52 +175,100 @@ in other scripts (CJK, Arabic, ...) are not drawn.
 ## Android
 
 ```
- Flutter scene (Impeller)
-   ... cards, buttons, sheets; Glass = BackdropFilter, blurs whatever is below
-   Listener (gestures)  >  Stack [ placeholder colour | Texture(id) | attribution ]
-                                                         ^ SurfaceProducer (ImageReader)
- libmapsoly_mln.so: MapLibre Native, GLES 3, own thread, own EGL context
-   EGL window surface on the producer's ANativeWindow  -- eglSwapBuffers -->
+ FlutterSurfaceView, transparent, Z-ordered on top   <- cards, buttons, sheets
+   MapLibreView: paints a hole (BlendMode.clear) where the map is; takes pointer events
+ ------------------------------------------------------------------------------
+ the activity's window (theme background, a hole where the SurfaceView below is)
+ ------------------------------------------------------------------------------
+ SurfaceView of MapSurface.kt, first child of the content view, behind the Flutter view
+   ^ libmapsoly_mln.so: MapLibre Native, GLES 3, own thread, own EGL context;
+     EGL window surface on the view's ANativeWindow  -- eglSwapBuffers --> SurfaceFlinger
 ```
 
 ### Design
 
-- **The map is a Flutter texture.** `MapSurface.kt` creates a
-  `TextureRegistry.SurfaceProducer`; its `Surface` goes to the bridge as an
-  `ANativeWindow`, the bridge makes an EGL window surface on it with its own GLES 3
-  context and MapLibre renders there (`native/maplibre/android/backend.hpp`). Flutter
-  shows it with a `Texture` widget at the bottom of the view. So, unlike on Linux, the map
-  *is* part of Flutter's scene: no transparent window, no hole, it may be clipped or
-  covered by anything, and the glass surfaces blur it with their own `BackdropFilter`.
-  `mlnb_set_blur` does nothing on Android and `MapScene.blurRects` is not sent.
+- **The same structure as on Linux.** The map is not part of Flutter's scene: it has a
+  layer of its own and SurfaceFlinger puts it and the interface together. Flutter never
+  imports, composites or blurs the map's pixels. (Until this was done the map was a
+  Flutter external texture, `TextureRegistry.createSurfaceProducer()` and a `Texture`
+  widget: every map frame was drawn, then composited over the whole screen again by
+  Flutter and blurred by `BackdropFilter`.)
+- **The Flutter view is transparent.** `MainActivity` overrides `getBackgroundMode()`
+  (`transparent`) and `getRenderMode()` (`surface`): the embedding then creates a
+  `FlutterSurfaceView` with `PixelFormat.TRANSPARENT` and `setZOrderOnTop(true)`
+  (`FlutterSurfaceView.init`), i.e. Flutter's layer has an alpha channel and lies above
+  the activity's window. (`FlutterActivity.getRenderMode()` by itself answers `texture`
+  for a transparent background, hence the second override.) `FlutterActivity` also makes
+  the window's background transparent for that mode; `MainActivity` puts the theme's
+  background colour back, because nothing is meant to show through the activity.
+  Everything Flutter draws except the map's rectangle is opaque as before.
+- **The map is a `SurfaceView`** (`MapSurface.kt`) added to the activity's content view
+  as its first child, behind the Flutter view, with the default Z order: its layer lies
+  *below* the window, which gets a hole where the view is. It is not focusable or
+  clickable and lies under the Flutter view, so every touch goes to Flutter. Dart places
+  it (`place`: the widget's rectangle in pixels of the screen, edges rounded) after each
+  layout. `SurfaceHolder.Callback` hands the `Surface` to the bridge as an
+  `ANativeWindow`; the bridge makes an EGL window surface on it with its own GLES 3
+  context and MapLibre renders there (`native/maplibre/android/backend.hpp`).
+- **`MapLibreView` is the Linux code path**: the hole (`_HolePainter`), the placeholder
+  colour until the first style has been drawn, `MapScene.blurRects` from the
+  `GlassRegistry`. One addition: while Android has taken the surface's window away (app
+  in the background) the placeholder is painted instead of the hole, and the hole comes
+  back 150 ms after the map got a window again (`MapSurface.present`), so the view never
+  uncovers a surface that has no picture yet.
+- **Blur** is the bridge's own pass, as on Linux (`Blur` in `mlnb.cpp`, called from the
+  Android backend's `swapBuffers` before the frame's fence and the swap); the scale of
+  the rectangles is the map's pixel ratio, which is not a whole number here.
+  `Glass` keeps its `BackdropFilter` for what Flutter itself draws behind a panel; over
+  the map it blurs transparent pixels and the registry's rectangles do the work.
+  After the pass the backend puts MapLibre's GL program back (MapLibre's drawables trust
+  their cached program id even when the cache is marked dirty; without this a frame now
+  and then set uniforms on the wrong program and MapLibre failed the frame with
+  `std::bad_alloc`), and it reads the GL error flag once: an error of the blur turns the
+  blur off for that map instead of failing MapLibre's next frame.
 - **One bridge, two backends.** `mlnb.cpp` is shared; the Wayland backend and the Android
   one are selected with `#ifdef __ANDROID__`. The C API is the same except for how a map
   gets its surface: `mlnb_android_create(window, width_px, height_px, pixel_ratio, ...)`
   and `mlnb_android_set_surface(map, window, width_px, height_px)` replace `mlnb_create`
   and `mlnb_set_geometry` (which exist on Android but do nothing useful). These symbols
-  are not in the Linux library; its ABI is still version 6 and `bridge.dart` looks the
-  Android ones up only on Android.
-- **Pixel ratio is the real one** (2.75 on a 440 dpi phone, not rounded): the texture has
-  exactly the widget's device pixels, the map's logical size is that divided by the ratio.
-  Pin and arrow images are drawn at the next whole number.
-- **The window comes and goes.** A resize (rotation) gives the producer a new surface, and
-  Android takes the surface away while the app is in the background
-  (`SurfaceLifecycle.resetInBackground`) and makes a new one afterwards. Kotlin tells the
-  native library first, synchronously (`mlnb_android_unregister_window` returns when the
-  map thread no longer touches the window), then Dart, which later passes the new window
-  to `mlnb_android_set_surface`. The EGL context, and with it every texture and buffer of
-  MapLibre, survives: without a window it is current on a 1x1 pbuffer and nothing is
-  drawn. Window pointers that Dart holds are only ever compared against the list of
-  windows Kotlin has registered, never dereferenced blindly. `TextureSurfaceController`
-  (`maplibre/surface_android.dart`) keeps the texture at the size wanted last.
-- **Pacing.** `eglSwapBuffers` does not wait here (the consumer is Flutter's raster
-  thread; swap interval 0), so frames are paced by the display: a small thread with an
-  `ALooper` asks `AChoreographer` for one callback per frame drawn; the next frame is
-  drawn right after that vsync. Every frame the map queues makes Flutter composite a
-  frame of its own.
+  are not in the Linux library and `bridge.dart` looks them up only on Android.
+- **Pixel budget** (`mapPixelRatio`, about 2.2 million pixels). The surface's buffers have
+  a fixed size of their own (`SurfaceHolder.setFixedSize`) which may be smaller than the
+  view; the display's scaler stretches them. A view that would need more than the budget
+  is drawn at a lower pixel ratio, in steps of a quarter, never below 1 and never above
+  the screen's ratio; lines and labels keep their size. A 2560x1600 tablet at density 2
+  draws 1600x1000; a 1600x2560 screen at 1.27 draws 1260x2016 (ratio 1: still over the
+  budget, but the floor). Between 1 and a screen ratio that is not on the quarter grid the
+  only values are 1 and 1.25, so a view resized by a few pixels does not change the ratio
+  (a new ratio is a new native map). At the screen's own ratio the buffers are exactly
+  the view. "Map at full resolution" in the settings lifts the budget. Pin and arrow
+  images are drawn at the next whole number above the map's ratio.
+- **The window comes and goes.** Android destroys the surface while the app is in the
+  background and makes a new one afterwards; new buffers (rotation, another ratio) are
+  announced the same way (`surfaceChanged`). Kotlin tells the native library first,
+  synchronously (`mlnb_android_unregister_window` returns when the map thread no longer
+  touches the window), then Dart, which passes the new window and the size of its
+  buffers to `mlnb_android_set_surface`. The EGL context, and with it every texture and
+  buffer of MapLibre, survives: without a window it is current on a 1x1 pbuffer and
+  nothing is drawn. Window pointers that Dart holds are only ever compared against the
+  list of windows Kotlin has registered, never dereferenced blindly.
+  `SurfaceViewController` (`maplibre/surface_android.dart`) keeps the view where it was
+  wanted last.
+- **`visible: false`** stops rendering (`tick()`); the view stays and keeps its last
+  frame under whatever opaque section covers the map, so coming back shows a picture at
+  once. (Linux unmaps its subsurface instead.)
+- **Pacing.** Swap interval 0: `eglSwapBuffers` never waits for SurfaceFlinger. Frames
+  are paced by the display: a small thread with an `ALooper` asks `AChoreographer` for
+  one callback per frame drawn; the next frame is drawn right after that vsync. In whole
+  vsyncs (`Backend::pace`): after each frame the map thread waits on an EGL fence for
+  the GPU to finish it (blur included), and when frames stop fitting into one vsync the
+  map draws every second (third, fourth) one instead of a random mix; it goes back after
+  two seconds of frames fitting with room to spare. The frame rate cap is a vsync count
+  too. This was kept as it was with the texture: nothing found speaks for swap interval
+  1 (a late frame would then block the map thread in the buffer queue for a refresh).
 - **Logging** goes to logcat: tag `mlnb` for the bridge and MapLibre, `flutter` for the
-  `map engine: ...` lines. No signal handler is installed (Android writes a tombstone with
-  a backtrace itself) and the map thread is not pinned to cores.
+  `map engine: ...` and `map surface: ...` lines. No signal handler is installed (Android
+  writes a tombstone with a backtrace itself) and the map thread is not pinned to cores.
 
 ### MapLibre Native for Android: what it is built from
 
@@ -276,36 +324,64 @@ makes the view fall back to the Flutter engine.
 
 ### Differences from Linux, limits
 
-- No blur pass, no subsurface, no frame-callback pacing, no core pinning, no crash
-  handler (see above); `MLNB_FREERUN`, `MLNB_NO_PIN`, `MLNB_NO_CRASH_HANDLER` and
-  `MAPSOLY_MAP_BLUR` mean nothing there. Of the debug hooks only the engine override and
-  the frame log exist: `adb shell setprop debug.mapsoly.map_framelog
+- No frame-callback pacing, no core pinning, no crash handler (see above);
+  `MLNB_FREERUN`, `MLNB_NO_PIN`, `MLNB_NO_CRASH_HANDLER` and `MAPSOLY_MAP_BLUR` mean
+  nothing there (there is no environment to set). Of the debug hooks only the engine
+  override and the frame log exist: `adb shell setprop debug.mapsoly.map_framelog
   /sdcard/Android/data/dev.mapsoly.mapsoly/files/frames.csv`.
 - JPEG and WebP images are not decoded and MapLibre cannot fetch from the network itself.
   A style that needs either would have to go through the tile server (as PNG).
-- The map is one frame behind the widgets drawn over it in the worst case (it is drawn
-  after a vsync and composited by Flutter at the next one), and every map frame costs a
-  Flutter frame with its blurs on top. Whether that matters on a slow phone is not known.
-- The texture has a pixel budget (`mapPixelRatio`, about 2.2 million pixels): a view that
-  would need more is drawn at a lower pixel ratio, never below 1.25, and scaled up by
-  Flutter; lines and labels keep their size. A 2560x1600 tablet at density 2 draws
-  1600x1000. "Map at full resolution" in the settings lifts the budget.
-- Frames are paced in whole vsyncs (`Backend::pace` in `native/maplibre/android/backend.hpp`):
-  after each frame the map thread waits on an EGL fence for the GPU to finish it, and
-  when frames stop fitting into one vsync the map draws every second (third, fourth) one
-  instead of a random mix; it goes back after two seconds of frames fitting with room to
-  spare. The frame rate cap is a vsync count there too.
-- All glass panels share one backdrop blur (`BackdropGroup` in the map screen).
-- The three points above were checked on the emulator only (software GPU): the budget and
-  the pacing work as written; what they gain on a real GPU is unmeasured.
+- As on Linux the map's layer is not synchronised with Flutter's frames: during a
+  rotation, or if the map widget were moved or animated, map and widgets can be a frame
+  or two apart; the widget must not be clipped, faded or transformed and anything meant
+  to cover it must be opaque.
+- The Flutter view is transparent for the whole app, also when the Flutter map engine
+  draws (`debug.mapsoly.map_engine=flutter`, or MapLibre failed): its layer is then
+  blended over the window although it is opaque everywhere. Android views added to the
+  window (platform views) would lie *under* Flutter's layer; the app has none.
+- Three layers are composited while the map shows (map, window, Flutter). Whether the
+  tablet's hardware composer takes them as overlays or falls back to GPU composition is
+  not known.
 - armeabi-v7a is not built by default (the script accepts it; never tried).
-- **Tested on the emulator only** (x86_64, API 34). The arm64 library is built and
-  packaged but has never run; frame rates on a phone are unmeasured. See
-  `docs/android.md`.
 - The emulator's default software renderer (`-gpu swiftshader_indirect`) draws the map
   without any text or icons: its GLES translator mishandles the alpha-only glyph textures.
   With `-gpu swangle_indirect` (ANGLE on SwiftShader) and with `-gpu host` everything is
   drawn. No GL error is reported in either case.
+
+### What was verified, and what was not
+
+On the emulator (x86_64, API 34, 1080x2340 at 2.75, software GPU, Flutter on Impeller's
+OpenGL ES backend), by screenshot (`screencap` composites all layers) and logcat:
+
+- map under the interface at a cold start (splash, placeholder colour, map; no black
+  frame caught), panels frosted over the map, light and dark theme;
+- pan, double-tap zoom, a two-finger pinch (raw multi-touch events written to the
+  emulator's input device), the zoom buttons, 3D with extruded buildings, traffic, the
+  signal layer switched on and off (with no collected data to show);
+- Settings, Routes and Search cover the map and coming back shows it again;
+- rotation to landscape and back (the view follows, new buffers are announced);
+- HOME and return (surface destroyed and made again);
+- the budget (2.75 -> 2.5: buffers 982x2007 stretched over a 1080x2208 view) and "Map at
+  full resolution" (1080x2208); SurfaceFlinger's layer list shows the map's layer below
+  the window and Flutter's above;
+- the engine override (the Flutter map engine under the transparent view) and the frame
+  log property;
+- recreating the native map (the resolution switch) ten times with every GL call of the
+  bridge checked for errors: none, after the program fix described under "Blur".
+
+Not verified:
+
+- **Anything on a real device.** In particular: Flutter's transparent surface with
+  Impeller on **Vulkan** (the emulator is refused Vulkan by Impeller and uses OpenGL ES;
+  by the source, `khr_swapchain_impl_vk.cc` prefers `VK_COMPOSITE_ALPHA_INHERIT`, which
+  takes the transparency of the `SurfaceView`'s layer, but that is reading, not a
+  test); the blur pass on a mobile GPU (it reads the default framebuffer back, which a
+  tile-based GPU does not like); what the hardware scaler makes of a 1260x2016 picture
+  on a 1600x2560 panel; frame costs and what the change gains. The arm64 library is
+  built and packaged but has never run with this code.
+- Two-finger rotation and tilt; the gesture code is unchanged and receives the same
+  pointer events.
+- A density change or a second display while the app runs.
 
 ## Signal map (heat map of the collected transmitters)
 
@@ -371,7 +447,8 @@ nothing inside them.
 
 `test/map/engine/`: camera arithmetic and fitting, the gesture machine, style rewriting for
 both bundled styles, scene diffing and GeoJSON, tile-server URL handling and the Yandex
-strip maths, and (`surface_test.dart`) the Android texture's size/window bookkeeping
+strip maths, the Android pixel budget (`map_pixel_ratio_test.dart`), and
+(`surface_test.dart`) where the Android surface is placed and its window bookkeeping
 against a fake platform channel. The native bridge and the widget itself are only tested
 on the device.
 
@@ -383,8 +460,8 @@ tests above (source and layer only when on, the order), `test/map/map_screen_tes
 ## Not done
 
 - X11 uses the Flutter engine.
-- On Linux the map is not a Flutter texture (route A of the prototype, code in
-  `spike/maplibre_flutter/`); on Android it is, see above.
+- The map is not a Flutter texture on either platform (route A of the prototype, code in
+  `spike/maplibre_flutter/`; Android used one until the map got its own `SurfaceView`).
 - The subsurface is not synchronised with Flutter frames: during a window resize, or if the
   map widget were moved or animated, map and widgets can be a frame apart. The widget must
   not be clipped, faded or transformed; anything meant to cover it must be opaque.

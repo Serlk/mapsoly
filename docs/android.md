@@ -1,8 +1,8 @@
 # Android
 
 The app runs on Android with the same MapLibre Native map engine as on Linux
-(GPU vector rendering, tilt and 3D buildings, rotation), drawn into a Flutter
-texture; without its library in the APK it falls back to the Flutter map
+(GPU vector rendering, tilt and 3D buildings, rotation), drawn into a
+`SurfaceView` of its own below the transparent Flutter view; without its library in the APK it falls back to the Flutter map
 engine (flutter_map + vector tiles from PMTiles). Everything platform-specific goes through the app's own
 small platform channels in `android/app/src/main/kotlin/dev/mapsoly/mapsoly/`;
 there are no Google Play services, no API keys and no third-party plugins
@@ -38,7 +38,7 @@ files directory.
 
 | Feature | Android side | Dart side |
 | --- | --- | --- |
-| Online and offline map, traffic, route, 3D | `MapSurface.kt`: the Flutter texture MapLibre draws into, unpacking of glyphs/sprites; `libmapsoly_mln.so` (`native/maplibre/`) | `lib/map/engine/maplibre_engine.dart`, `maplibre/surface_android.dart`; `docs/map-engine.md`, "Android" |
+| Online and offline map, traffic, route, 3D | `MapSurface.kt`: the `SurfaceView` MapLibre draws into (below the Flutter view, which `MainActivity` makes transparent), unpacking of glyphs/sprites; `libmapsoly_mln.so` (`native/maplibre/`) | `lib/map/engine/maplibre_engine.dart`, `maplibre/surface_android.dart`; `docs/map-engine.md`, "Android" |
 | Map without that library, packs | — (pure Dart) | `lib/map/engine/flutter_map_engine.dart`, `lib/packs/` |
 | SQLite (address search, cameras, positioning database) | prebuilt `libsqlite3.so` from the Maven artifact `eu.simonbinder:sqlite3-native-library` (`android/app/build.gradle.kts`) | `package:sqlite3` opens it by name |
 | Position from satellites | `LocationBridge.kt`: `LocationManager`, GPS provider, 1 Hz, plus `GnssStatus` satellites | `AndroidGnssSource` → `PositioningEngine` (`lib/positioning/platform_engine.dart`) |
@@ -246,7 +246,8 @@ logcat), and the fallback to the Flutter engine both by the property and with
 the library left out of the APK.
 
 Frame times of the map itself (`debug.mapsoly.map_framelog`, 1080x2208
-texture, city centre with traffic): with `-gpu host` (a desktop integrated
+texture, city centre with traffic; measured when the map still was a Flutter
+texture, not repeated since): with `-gpu host` (a desktop integrated
 GPU behind the emulator's GL translation, 60 Hz) a median of 17-20 ms between
 frames while panning and zooming, 10-14 ms of that in MapLibre's render call;
 with `swangle_indirect` about 0.3 s per frame, which only measures the

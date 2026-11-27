@@ -130,8 +130,9 @@ public:
         program = vao = 0;
     }
 
-    // rects in logical px; sigma in logical px; fb size in physical px.
-    void run(const std::vector<BlurRect>& rects, float sigma, int scale, int fbW, int fbH) {
+    // rects in logical px; sigma in logical px; fb size in physical px. scale: physical
+    // pixels per logical one (a whole number on Wayland, any positive number on Android).
+    void run(const std::vector<BlurRect>& rects, float sigma, float scale, int fbW, int fbH) {
         if (rects.empty() || sigma <= 0 || !ensureProgram()) return;
         glDisable(GL_SCISSOR_TEST);
         glDisable(GL_STENCIL_TEST);
@@ -143,7 +144,7 @@ public:
         glUseProgram(program);
         glBindVertexArray(vao);
         if (slots.size() < rects.size()) slots.resize(rects.size());
-        const float sigmaPx = sigma * static_cast<float>(scale);
+        const float sigmaPx = sigma * scale;
         const int margin = static_cast<int>(std::ceil(3 * sigmaPx));
         for (std::size_t i = 0; i < rects.size(); ++i) {
             const BlurRect& r = rects[i];
@@ -516,8 +517,17 @@ public:
     void swapBuffers() {
         const int64_t t0 = monoUs();
         if (!blurRects.empty()) {
-            blur.run(blurRects, blurSigma, scale, static_cast<int>(getSize().width),
+            // The program is put back, not merely declared unknown: MapLibre's
+            // DrawableGL::draw trusts its cached "current program" without asking
+            // whether the cache is still true, and a frame that starts with the program
+            // the last one ended with would set its uniforms on the blur's. The GL error
+            // from that is read at MapLibre's next allocation and taken for "out of
+            // memory": the "frame failed: std::bad_alloc" lines.
+            GLint program = 0;
+            glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+            blur.run(blurRects, blurSigma, static_cast<float>(scale), static_cast<int>(getSize().width),
                      static_cast<int>(getSize().height));
+            glUseProgram(static_cast<GLuint>(program));
             // MapLibre caches GL state: everything touched above is unknown to it now.
             auto& glContext = static_cast<mln::gl::Context&>(*context);
             glContext.setDirtyState();
@@ -1052,7 +1062,7 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
             ANativeWindow* window = firstWindow;
             firstWindow = nullptr; // the backend owns the reference, also when it throws
             backend = std::make_unique<Backend>(
-                window, mln::Size{static_cast<uint32_t>(fbWidth), static_cast<uint32_t>(fbHeight)});
+                window, mln::Size{static_cast<uint32_t>(fbWidth), static_cast<uint32_t>(fbHeight)}, ratio);
 #else
             const auto ratio = static_cast<float>(scale);
             const mln::Size fb{static_cast<uint32_t>(width * scale), static_cast<uint32_t>(height * scale)};
@@ -1579,18 +1589,12 @@ void mlnb_set_blur(mlnb_map* m, const float* xywh, int32_t count, float sigma) {
     for (int32_t i = 0; xywh && i < count; ++i) {
         rects.push_back({xywh[4 * i], xywh[4 * i + 1], xywh[4 * i + 2], xywh[4 * i + 3]});
     }
-#ifdef __ANDROID__
-    // The map is a texture in Flutter's scene there: Flutter's own BackdropFilter blurs it.
-    (void)m;
-    (void)sigma;
-#else
     m->post([m, rects = std::move(rects), sigma] {
         m->backend->blurRects = rects;
         m->backend->blurSigma = sigma;
         m->dirty = true;
         m->map->triggerRepaint();
     });
-#endif
 }
 
 void mlnb_snapshot(mlnb_map* m, const char* ppm_path) {

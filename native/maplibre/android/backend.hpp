@@ -1,21 +1,23 @@
 // The Android rendering backend of mlnb: an EGL window surface on an ANativeWindow.
 // Included by mlnb.cpp, inside its anonymous namespace, in place of the Wayland backend.
 //
-// The window is the producer side of a Flutter external texture (a `Surface` from
-// `TextureRegistry.createSurfaceProducer()`, see MapSurface.kt), so the map becomes part
-// of Flutter's own scene: Flutter composites it, clips it and blurs it under glass
-// surfaces like any other layer. What that changes compared with the Wayland backend:
+// The window is the `Surface` of a `SurfaceView` that MapSurface.kt puts below the
+// transparent Flutter view, so, as on Wayland, the map is not part of Flutter's scene:
+// SurfaceFlinger puts the two together, Flutter leaves a hole where the map is, and the
+// frosted glass under the panels is this bridge's own blur pass. The buffers may be
+// smaller than the view (SurfaceHolder.setFixedSize); the display scales them up. What
+// differs from the Wayland backend:
 //
 //  - The window comes and goes. Android takes the surface away while the app is in the
-//    background and hands out a new one afterwards, and a resize gives a new one too.
+//    background and hands out a new one afterwards; a resize changes its buffers.
 //    The EGL context, and with it everything MapLibre uploaded, stays; without a window
 //    the context is current on a 1x1 pbuffer and nothing is drawn.
-//  - Pacing. Nothing blocks in eglSwapBuffers here (the consumer is Flutter's raster
-//    thread, not the display; swap interval 0 never waits for it), so frames are paced by
-//    the display's vsync from AChoreographer: a frame every one, two, three or four
-//    vsyncs, as many as the GPU turns out to need (see Backend::pace), drawn right after
-//    the vsync, and never before the GPU is done with the previous one.
-//  - No blur pass: Flutter's BackdropFilter reaches the texture.
+//  - Pacing. Swap interval 0: eglSwapBuffers never waits for SurfaceFlinger (a frame
+//    that is late would otherwise hold the map thread for a whole refresh in the buffer
+//    queue). Frames are paced by the display's vsync from AChoreographer instead: a
+//    frame every one, two, three or four vsyncs, as many as the GPU turns out to need
+//    (see Backend::pace), drawn right after the vsync, and never before the GPU is done
+//    with the previous one.
 class Vsync {
 public:
     explicit Vsync(std::function<void(int64_t)> onVsync_)
@@ -71,9 +73,11 @@ private:
 class Backend final : public mln::gl::RendererBackend, public mln::gfx::Renderable {
 public:
     // Takes over the caller's reference to `window` (may be null: no surface yet).
-    Backend(ANativeWindow* window, mln::Size fb)
+    // pixelRatio_: buffer pixels per logical pixel, the scale of the blur rectangles.
+    Backend(ANativeWindow* window, mln::Size fb, float pixelRatio_)
         : mln::gl::RendererBackend(mln::gfx::ContextMode::Unique),
           mln::gfx::Renderable(fb, std::make_unique<Resource>(*this)),
+          pixelRatio(pixelRatio_),
           vsync(std::make_unique<Vsync>([this](int64_t ns) {
               // The display's period: the shortest time seen between two vsyncs
               // (starts at 60 Hz; a faster panel shows itself at once).
@@ -95,7 +99,8 @@ public:
             throw std::runtime_error("EGL display not available");
         }
         eglBindAPI(EGL_OPENGL_ES_API);
-        // RGBA 8888 is what a texture producer's buffers are; depth/stencil for MapLibre.
+        // RGBA 8888 buffers (the SurfaceView's layer is opaque whatever the alpha says);
+        // depth/stencil for MapLibre.
         const EGLint attrs[] = {EGL_SURFACE_TYPE, EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
                                 EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
                                 EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
@@ -125,12 +130,13 @@ public:
         }
         setWindow(window, fb);
         constructed = true;
-        MLNB_LOG("mlnb: %s | %s | texture surface %ux%u\n", glGetString(GL_RENDERER), glGetString(GL_VERSION),
+        MLNB_LOG("mlnb: %s | %s | window surface %ux%u\n", glGetString(GL_RENDERER), glGetString(GL_VERSION),
                  getSize().width, getSize().height);
     }
 
     ~Backend() override {
         makeCurrent();
+        blur.release();
         context.reset(); // gl::Context of MapLibre (the Renderer is gone already)
         destroyEgl();
         eglReleaseThread();
@@ -185,7 +191,9 @@ public:
 
     bool hasSurface() const { return eglSurface != EGL_NO_SURFACE; }
 
-    void hide() {} // the texture is simply not shown; rendering stops in tick()
+    // Nothing to unmap: the view keeps showing the last frame under whatever covers
+    // the map in Flutter; rendering stops in tick().
+    void hide() {}
     void dispatch(bool) {}
 
     void bindDefault() {
@@ -243,13 +251,42 @@ public:
 
     void swapBuffers() {
         const int64_t t0 = monoUs();
+        if (!blurRects.empty() && eglSurface != EGL_NO_SURFACE && !blurFailed) {
+            // MapLibre's drawables take the program of its state cache for the one in
+            // use without asking whether the cache is still true (DrawableGL::draw
+            // compares getCurrentValue() and ignores the dirty flag). A frame that
+            // starts with the program the last one ended with would then set its
+            // uniforms and draw with the blur's program, or none: so the program is
+            // put back, not merely declared unknown.
+            GLint program = 0;
+            glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+            blur.run(blurRects, blurSigma, pixelRatio, static_cast<int>(getSize().width),
+                     static_cast<int>(getSize().height));
+            glUseProgram(static_cast<GLuint>(program));
+            // MapLibre caches GL state: everything else touched above is unknown to it now.
+            auto& glContext = static_cast<mln::gl::Context&>(*context);
+            glContext.setDirtyState();
+            glContext.bindFramebuffer.setDirty();
+            glContext.viewport.setDirty();
+            // MapLibre reads the GL error flag after it made a buffer or a texture and
+            // takes any error for "out of memory", which fails its frame. An error of
+            // the blur must not get that far (and a blur that makes one is not worth
+            // having: it is turned off for this map).
+            GLenum error = GL_NO_ERROR;
+            for (GLenum e; (e = glGetError()) != GL_NO_ERROR;) error = e;
+            if (error != GL_NO_ERROR) {
+                blurFailed = true;
+                MLNB_LOG("mlnb: GL error 0x%x in the blur pass; blur is off\n", error);
+            }
+        }
+        lastBlurMs = (monoUs() - t0) / 1000.0;
         if (!snapshotPath.empty()) writeSnapshot();
         if (eglSurface != EGL_NO_SURFACE) {
-            // A fence after the frame's last command: when it signals, the GPU is done
-            // with the frame. Waiting for it keeps the map from handing the GPU more
-            // than it can finish (the swap itself never waits here), and tells what the
-            // frame really cost. Flutter waits on the same work before it shows the
-            // picture; a frame it has to wait long for stalls the whole interface.
+            // A fence after the frame's last command (the blur included): when it
+            // signals, the GPU is done with the frame. Waiting for it keeps the map from
+            // handing the GPU more than it can finish (the swap itself never waits
+            // here), and tells what the frame really cost. SurfaceFlinger does not show
+            // a buffer before the same work is done.
             EGLSyncKHR fence = fenceSync ? createSync(dpy, EGL_SYNC_FENCE_KHR, nullptr) : EGL_NO_SYNC_KHR;
             const bool swapped = eglSwapBuffers(dpy, eglSurface);
             if (fence != EGL_NO_SYNC_KHR) {
@@ -304,6 +341,13 @@ public:
     // nothing is drawn, which is what is wanted.
     const bool stalled = false;
     std::function<void()> onFrame; // called on the vsync thread
+
+    // Rectangles of the frame presented blurred, see Blur. Map thread only.
+    std::vector<BlurRect> blurRects;
+    float blurSigma = 0;
+    double lastBlurMs = 0;
+    Blur blur;
+    bool blurFailed = false;
     double lastSwapMs = 0;
 
 protected:
@@ -324,6 +368,7 @@ private:
         nativeWindow = nullptr;
     }
 
+    const float pixelRatio;
     ANativeWindow* nativeWindow = nullptr;
     EGLDisplay dpy = EGL_NO_DISPLAY;
     EGLConfig config = nullptr;

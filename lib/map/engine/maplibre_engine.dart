@@ -26,13 +26,14 @@ import 'maplibre/tile_server.dart';
 
 /// MapLibre Native as the map engine (Linux on Wayland, Android).
 ///
-/// On Linux the map is not part of Flutter's scene. `libmapsoly_mln.so` draws
-/// it into a Wayland subsurface placed *below* the application window; the
-/// window is transparent and [MapLibreView] punches a hole into whatever
-/// Flutter painted underneath it, so the map shows through while every widget
-/// painted later (cards, buttons, sheets) stays on top. On Android the same
-/// library draws into a Flutter texture, shown by a `Texture` widget. That
-/// difference is all in [MapSurface]. Input never reaches the native map:
+/// The map is not part of Flutter's scene. `libmapsoly_mln.so` draws it into
+/// a surface placed *below* Flutter's picture (Linux: a Wayland subsurface
+/// below the application window; Android: a `SurfaceView` below the Flutter
+/// view); that picture is transparent and [MapLibreView] punches a hole into
+/// whatever Flutter painted underneath it, so the map shows through while
+/// every widget painted later (cards, buttons, sheets) stays on top. Which
+/// surface, and how it is placed, is all in [MapSurface]. Input never reaches
+/// the native map:
 /// gestures are ordinary Flutter pointer events, turned into camera changes
 /// here. See docs/map-engine.md.
 abstract final class MapLibreEngine {
@@ -397,12 +398,6 @@ class _MapLibreViewState extends State<MapLibreView>
     _prepare();
   }
 
-  /// The map as a widget where it is part of Flutter's scene (Android), null
-  /// where it lies below the window (Wayland). Built once: the surface's
-  /// widget listens for its texture itself.
-  late final Widget? _mapView = _surface.buildView();
-  bool get _inFlutterScene => _mapView != null;
-
   /// Background colours of the bundled styles, read from their `background`
   /// layers; shown in the map's place until the map itself has drawn.
   final Map<String, Color> _styleBackground = {};
@@ -441,6 +436,8 @@ class _MapLibreViewState extends State<MapLibreView>
     if (_disposed || _failure != null) return;
     mapEngineLog('map engine: MapLibre failed ($reason), using Flutter');
     _destroyMap();
+    // Whatever the surface put below the window goes with it.
+    _surface.dispose();
     setState(() {
       _failure = reason;
       widget.controller._fallback = FlutterMapViewController();
@@ -461,16 +458,16 @@ class _MapLibreViewState extends State<MapLibreView>
     final box = context.findRenderObject();
     if (box is! RenderBox || !box.hasSize || box.size.isEmpty) return;
     final origin = box.localToGlobal(Offset.zero);
-    // A subsurface sits on whole logical pixels; a texture covers the box
-    // exactly (logical sizes are fractions at Android's densities).
-    final rect = _inFlutterScene
-        ? origin & box.size
-        : Rect.fromLTWH(
+    // A Wayland subsurface sits on whole logical pixels; an Android surface
+    // covers the box exactly (logical sizes are fractions at its densities).
+    final rect = _surface.wholeLogicalPixels
+        ? Rect.fromLTWH(
             origin.dx.roundToDouble(),
             origin.dy.roundToDouble(),
             box.size.width.roundToDouble(),
             box.size.height.roundToDouble(),
-          );
+          )
+        : origin & box.size;
     final ratio = _surface.ratioFor(
       View.of(context).devicePixelRatio,
       rect.size,
@@ -697,9 +694,7 @@ class _MapLibreViewState extends State<MapLibreView>
   List<double>? _appliedBlur;
 
   List<double> _blurOf(MapScene scene, Size size) {
-    // A map inside Flutter's scene is blurred by the BackdropFilter of the
-    // glass surfaces themselves.
-    if (_blurMode == '0' || _inFlutterScene) return const [];
+    if (_blurMode == '0') return const [];
     return [
       for (final r in scene.blurRects) ...[r.left, r.top, r.width, r.height],
       if (_blurMode == 'strip') ...[0, size.height - 64, size.width, 64],
@@ -1164,7 +1159,6 @@ class _MapLibreViewState extends State<MapLibreView>
             ),
           ),
         );
-        final mapView = _mapView;
         return Listener(
           behavior: HitTestBehavior.opaque,
           onPointerDown: (e) =>
@@ -1179,24 +1173,14 @@ class _MapLibreViewState extends State<MapLibreView>
               _gestures.scroll(e.localPosition, e.scrollDelta.dy);
             }
           },
-          child: mapView == null
-              ? CustomPaint(
-                  painter: _HolePainter(
-                    open: _holeOpen && widget.visible,
-                    placeholder: placeholder,
-                  ),
-                  child: attribution,
-                )
-              // In Flutter's scene: the map is a layer of its own above the
-              // placeholder, shown once it has something to show.
-              : Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    ColoredBox(color: placeholder),
-                    if (_holeOpen) mapView,
-                    attribution,
-                  ],
-                ),
+          child: CustomPaint(
+            painter: _HolePainter(
+              open: _holeOpen && widget.visible,
+              present: _surface.present,
+              placeholder: placeholder,
+            ),
+            child: attribution,
+          ),
         );
       },
     );
@@ -1206,17 +1190,26 @@ class _MapLibreViewState extends State<MapLibreView>
 /// Clears the pixels of the map's rectangle, including anything painted
 /// below this widget (the scaffold's background), so the surface under the
 /// window shows through. Widgets painted afterwards are unaffected.
+///
+/// While the surface says it has nothing to show ([present] false: Android
+/// took its window away) the placeholder is painted instead, as before the
+/// first frame.
 class _HolePainter extends CustomPainter {
-  const _HolePainter({required this.open, required this.placeholder});
+  const _HolePainter({
+    required this.open,
+    required this.present,
+    required this.placeholder,
+  }) : super(repaint: present);
 
   final bool open;
+  final ValueListenable<bool>? present;
   final Color placeholder;
 
   @override
   void paint(Canvas canvas, Size size) {
     canvas.drawRect(
       Offset.zero & size,
-      open
+      open && (present?.value ?? true)
           ? (Paint()..blendMode = BlendMode.clear)
           : (Paint()..color = placeholder),
     );
@@ -1224,5 +1217,7 @@ class _HolePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_HolePainter old) =>
-      old.open != open || old.placeholder != placeholder;
+      old.open != open ||
+      old.present != present ||
+      old.placeholder != placeholder;
 }

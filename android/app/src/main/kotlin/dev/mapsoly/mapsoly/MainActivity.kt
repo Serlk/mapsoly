@@ -1,13 +1,17 @@
 package dev.mapsoly.mapsoly
 
 import android.content.Intent
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.util.TypedValue
 import android.view.View
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterActivityLaunchConfigs.BackgroundMode
+import io.flutter.embedding.android.RenderMode
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
@@ -23,8 +27,12 @@ import io.flutter.plugin.common.MethodChannel
  *    Wi-Fi scans and cell measurements (RadioBridge.kt).
  *  - `mapsoly/android/location`, `/compass`, `/still`, `/bluetooth`: event
  *    streams.
- *  - `mapsoly/map_surface`: the texture the MapLibre map engine draws into
+ *  - `mapsoly/map_surface`: the surface the MapLibre map engine draws into
  *    (MapSurface.kt).
+ *
+ * The Flutter view is transparent and its surface lies above the window: the map is a
+ * `SurfaceView` of its own underneath (MapSurface.kt), seen through the hole the map
+ * widget leaves in Flutter's picture. Everything else Flutter draws is opaque.
  */
 class MainActivity : FlutterActivity() {
     private lateinit var permissions: Permissions
@@ -35,8 +43,27 @@ class MainActivity : FlutterActivity() {
     private var mapSurface: MapSurface? = null
     private val sound = AlertPlayer()
 
+    // A FlutterSurfaceView with an alpha channel, Z-ordered on top of the window
+    // (FlutterSurfaceView.init). FlutterActivity pairs a transparent background with a
+    // TextureView by default; that would put Flutter's picture back into the window
+    // and cost a copy of the whole screen per frame, hence the render mode.
+    override fun getBackgroundMode(): BackgroundMode = BackgroundMode.transparent
+
+    override fun getRenderMode(): RenderMode = RenderMode.surface
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // FlutterActivity made the window's background transparent for the mode above.
+        // Nothing is meant to be seen through this activity: the background of the
+        // theme again, so wherever Flutter's picture has a hole and no map lies below,
+        // there is the theme's colour and not whatever is behind the window.
+        val background = TypedValue()
+        if (theme.resolveAttribute(android.R.attr.colorBackground, background, true) &&
+            background.type >= TypedValue.TYPE_FIRST_COLOR_INT &&
+            background.type <= TypedValue.TYPE_LAST_COLOR_INT
+        ) {
+            window.setBackgroundDrawable(ColorDrawable(background.data))
+        }
         // With a hardware keyboard Android frames the focused view, which
         // here is always the whole screen.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -53,7 +80,7 @@ class MainActivity : FlutterActivity() {
         stillness = StillnessBridge(this, messenger)
         val bt = BluetoothBridge(this, messenger).also { bluetooth = it }
         val radio = RadioBridge(this)
-        mapSurface = MapSurface(applicationContext, flutterEngine.renderer, messenger)
+        mapSurface = MapSurface(this, messenger)
 
         MethodChannel(messenger, "mapsoly/native_view").setMethodCallHandler { call, result ->
             when (call.method) {

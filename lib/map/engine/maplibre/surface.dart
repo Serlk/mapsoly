@@ -1,8 +1,8 @@
 import 'dart:ffi' hide Size;
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart';
 
 import 'bridge.dart';
 import 'surface_android.dart';
@@ -11,11 +11,12 @@ typedef MapEventCallback = Pointer<NativeFunction<Void Function(Int32, Int64)>>;
 
 /// Where the native map draws, and how the widget's rectangle gets there.
 ///
-/// The one part of the MapLibre engine that differs per platform:
-///  - Linux: a Wayland subsurface *below* the transparent Flutter window
-///    ([WaylandMapSurface]); the widget punches a hole to show it.
-///  - Android: a Flutter texture ([AndroidMapSurface]); the map is a widget in
-///    Flutter's own scene.
+/// The one part of the MapLibre engine that differs per platform. Neither is
+/// part of Flutter's scene: the map lies *below* the transparent Flutter
+/// picture, the widget punches a hole to show it, and the bridge blurs it
+/// under the glass panels.
+///  - Linux: a Wayland subsurface below the window ([WaylandMapSurface]).
+///  - Android: a `SurfaceView` below the Flutter view ([AndroidMapSurface]).
 abstract class MapSurface {
   factory MapSurface.forPlatform() =>
       Platform.isAndroid ? AndroidMapSurface() : WaylandMapSurface();
@@ -33,7 +34,19 @@ abstract class MapSurface {
   ///
   /// [view] is the size of the map in logical pixels, for a surface whose
   /// ratio depends on how many pixels that makes.
+  ///
+  /// Asked with the view's current ratio before every [create] and
+  /// [setGeometry].
   double ratioFor(double devicePixelRatio, [Size? view]);
+
+  /// Whether the surface can only lie on whole logical pixels: the widget's
+  /// rectangle is then rounded before [create] and [setGeometry].
+  bool get wholeLogicalPixels;
+
+  /// False while the surface has nothing to show although a map exists (its
+  /// window was taken away): the widget then paints the placeholder colour
+  /// instead of the hole. Null when the surface is always there.
+  ValueListenable<bool>? get present;
 
   /// Creates the native map for the widget at [rect] (logical pixels in the
   /// window's coordinates). Null when that failed.
@@ -49,12 +62,6 @@ abstract class MapSurface {
 
   /// The native map of the last [create] is about to be destroyed.
   void detach();
-
-  /// The map as a widget, when it is part of Flutter's scene; null when it
-  /// lies outside (below the window) and the widget only has to uncover it.
-  /// A surface that returns a widget is clipped and blurred by Flutter like
-  /// any other, so the engine's own blur rectangles are not used with it.
-  Widget? buildView();
 
   /// Called with a reason when the surface stops working after [prepare].
   ValueChanged<String>? onError;
@@ -144,7 +151,10 @@ class WaylandMapSurface implements MapSurface {
   void detach() => _map = null;
 
   @override
-  Widget? buildView() => null;
+  bool get wholeLogicalPixels => true;
+
+  @override
+  ValueListenable<bool>? get present => null;
 
   @override
   void dispose() => _map = null;

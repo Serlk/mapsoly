@@ -2,9 +2,10 @@
 // placed below a parent wl_surface (the GTK/Flutter window, which must be transparent
 // where the map should show). Used from Dart through dart:ffi; see docs/map-engine.md.
 //
-// On Android the map is drawn into an ANativeWindow instead (the producer side of a
-// Flutter texture): the mlnb_android_* functions at the end replace mlnb_create and
-// mlnb_set_geometry there; everything else is the same on both platforms.
+// On Android the map is drawn into an ANativeWindow instead (the Surface of a SurfaceView
+// placed below the transparent Flutter view): the mlnb_android_* functions at the end
+// replace mlnb_create and mlnb_set_geometry there; everything else is the same on both
+// platforms.
 //
 // Threading: every function may be called from any thread. Calls are posted to the map's
 // own thread and return immediately, except mlnb_create (waits until the map thread is
@@ -102,9 +103,11 @@ MLNB_API void mlnb_android_register_window(void* native_window);
 // none of them touches it any more.
 MLNB_API void mlnb_android_unregister_window(void* native_window);
 
-// width_px, height_px: size of the window's buffers in device pixels. pixel_ratio:
-// device pixels per logical pixel (any positive number), fixed for the lifetime of the
-// map; camera padding and the map's own size are in logical pixels as elsewhere.
+// width_px, height_px: size of the window's buffers in pixels. pixel_ratio: buffer
+// pixels per logical pixel (any positive number; less than the screen's when the buffer
+// is smaller than the view and the display scales it up), fixed for the lifetime of the
+// map; camera padding, blur rectangles and the map's own size are in logical pixels as
+// elsewhere.
 // native_window may be NULL: the map exists but draws nothing until it gets one.
 MLNB_API mlnb_map* mlnb_android_create(void* native_window, int32_t width_px, int32_t height_px, double pixel_ratio,
                                        const char* cache_path, mlnb_event_cb cb);
