@@ -18,8 +18,12 @@ class KeepAwake {
     _channel
         .invokeMethod<bool>('keepAwake', on)
         .then(
-          (held) =>
-              debugPrint('keep awake: ${on ? 'on' : 'off'} (held: $held)'),
+          (held) {
+            debugPrint('keep awake: ${on ? 'on' : 'off'} (held: $held)');
+            // Not taken (the window was not there yet): the next request
+            // tries again.
+            if (on && held != true && _on) _on = false;
+          },
           onError: (Object e) {
             if (e is! MissingPluginException) {
               debugPrint('Keep awake failed: $e');

@@ -251,8 +251,9 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
         widget.settings.speedSound) {
       unawaited(AlertSound.play());
     }
-    // On the dashboard the screen stays on: while guided, and while moving.
-    _keepAwake.set(_route.guiding || _chrome.moving);
+    // Asked again here in case the first request came before the window
+    // was ready.
+    _keepAwake.set(true);
     final progress = _route.progress;
     // Moving without a route: the map still goes 3D, unless switched off.
     final cruising = _chrome.moving && progress == null;
@@ -349,6 +350,11 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     _route.addListener(_onRouteChanged);
     _speedLimit.addListener(_rebuild);
     _findCompass();
+    // The map is something to look at, not to touch: the screen stays on
+    // for as long as the app is open, until the user turns it off.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _keepAwake.set(true);
+    });
     _route.trafficSampler = _traffic.sampler;
     _glass.addListener(_rebuild);
     _map.cameraChanges.addListener(_onCameraMoved);
