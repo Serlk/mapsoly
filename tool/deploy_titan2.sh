@@ -30,3 +30,18 @@ if [ -x "$SHIM" ]; then
 else
   echo "warning: $SHIM missing, routing will not work (run lib/routing/native/build_shim.sh)"
 fi
+# The app icon for the launcher: the scalable picture and a few sizes, and the
+# launcher entry pointed at it (the entry itself is created once by hand).
+ICONS=/home/serlk/.local/share/icons/hicolor
+tar cf - -C assets/icon . | ssh -i "$KEY" "$HOST" "
+  mkdir -p $ICONS/scalable/apps /tmp/mapsoly-icon && tar xf - -C /tmp/mapsoly-icon &&
+  cp /tmp/mapsoly-icon/mapsoly.svg $ICONS/scalable/apps/dev.mapsoly.mapsoly.svg &&
+  for s in 48 64 128 256 512; do
+    mkdir -p $ICONS/\${s}x\${s}/apps &&
+    cp /tmp/mapsoly-icon/mapsoly-\$s.png $ICONS/\${s}x\${s}/apps/dev.mapsoly.mapsoly.png
+  done
+  rm -rf /tmp/mapsoly-icon
+  chown -R serlk:serlk /home/serlk/.local/share/icons
+  D=/home/serlk/.local/share/applications/dev.mapsoly.mapsoly.desktop
+  [ -f \$D ] && sed -i 's/^Icon=.*/Icon=dev.mapsoly.mapsoly/' \$D
+  true"
