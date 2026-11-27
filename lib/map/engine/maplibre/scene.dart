@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import '../../../traffic/traffic_sampler.dart';
 import 'dart:convert';
 
@@ -17,7 +18,12 @@ class SceneState {
     this.accuracy = emptyGeoJson,
     this.heat = emptyGeoJson,
     this.traffic,
+    this.puck,
   });
+
+  /// The position marker; null when there is no position. Not GeoJSON: the
+  /// native side moves it between updates by itself.
+  final PuckState? puck;
 
   static const emptyGeoJson = '{"type":"FeatureCollection","features":[]}';
 
@@ -38,6 +44,40 @@ class SceneState {
 
 sealed class SceneOp {
   const SceneOp();
+}
+
+/// Where the position marker is to be, and how it looks.
+@immutable
+class PuckState {
+  const PuckState({
+    required this.lat,
+    required this.lon,
+    required this.accuracyM,
+    this.heading,
+  });
+
+  final double lat, lon;
+
+  /// Degrees clockwise from north; null draws a dot instead of an arrow.
+  final double? heading;
+  final double accuracyM;
+
+  @override
+  bool operator ==(Object other) =>
+      other is PuckState &&
+      other.lat == lat &&
+      other.lon == lon &&
+      other.heading == heading &&
+      other.accuracyM == accuracyM;
+
+  @override
+  int get hashCode => Object.hash(lat, lon, heading, accuracyM);
+}
+
+/// Move (or hide, with null) the position marker.
+class SetPuck extends SceneOp {
+  const SetPuck(this.puck);
+  final PuckState? puck;
 }
 
 /// Replace the whole style; everything else must be sent again afterwards
@@ -69,6 +109,7 @@ List<SceneOp> diffScene(SceneState? old, SceneState next) {
     if (old.accuracy != next.accuracy)
       SetGeoJson(MapIds.accuracy, next.accuracy),
     if (old.heat != next.heat) SetGeoJson(MapIds.heat, next.heat),
+    if (old.puck != next.puck) SetPuck(next.puck),
   ];
 }
 

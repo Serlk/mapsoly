@@ -17,7 +17,7 @@ extern "C" {
 #endif
 
 #define MLNB_API __attribute__((visibility("default")))
-#define MLNB_ABI_VERSION 6
+#define MLNB_ABI_VERSION 7
 
 typedef struct mlnb_map mlnb_map;
 
@@ -61,6 +61,20 @@ MLNB_API void mlnb_set_geojson(mlnb_map*, const char* source_id, const char* geo
 // Straight (not premultiplied) RGBA, width*height*4 bytes; copied before returning.
 MLNB_API void mlnb_add_image(mlnb_map*, const char* id, const uint8_t* rgba, int32_t width, int32_t height,
                              double pixel_ratio);
+
+// The position marker: the point feature of the GeoJSON source "mapsoly-puck" (properties
+// kind = "position" or "position-heading", heading) and its accuracy circle, a polygon in
+// the source "mapsoly-accuracy". Moves them to lat/lon, turned to bearing (degrees; NaN =
+// no direction), with a circle of accuracy_m metres, in duration_ms at a constant speed,
+// starting from where they are shown now (0 = at once). lat NaN removes the marker.
+// Kept across style changes: once the new style has the sources the marker is back.
+MLNB_API void mlnb_set_puck(mlnb_map*, double lat, double lon, double bearing, double accuracy_m,
+                            int32_t duration_ms);
+
+// At most this many frames a second while the map animates; 0 = every frame the display
+// takes. Each frame costs processor time in the GPU driver whatever it shows, so a camera
+// that follows a car for hours is better off at 30 than at 60.
+MLNB_API void mlnb_set_max_fps(mlnb_map*, int32_t fps);
 
 // Rectangles of the map presented blurred (frosted glass under translucent UI): count
 // times x, y, width, height in logical pixels from the map's top-left corner; sigma in

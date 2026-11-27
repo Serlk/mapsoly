@@ -14,6 +14,8 @@ class MapLibreBridge {
       _destroy = lib.lookupFunction<_PtrC, _PtrD>('mlnb_destroy'),
       _setGeometry = lib.lookupFunction<_GeomC, _GeomD>('mlnb_set_geometry'),
       _setVisible = lib.lookupFunction<_IntC, _IntD>('mlnb_set_visible'),
+      _setMaxFps = lib.lookupFunction<_IntC, _IntD>('mlnb_set_max_fps'),
+      _setPuck = lib.lookupFunction<_PuckC, _PuckD>('mlnb_set_puck'),
       _setStyle = lib.lookupFunction<_StyleC, _StyleD>('mlnb_set_style_json'),
       _setCamera = lib.lookupFunction<_CamC, _CamD>('mlnb_set_camera'),
       _addSource = lib.lookupFunction<_Str2C, _Str2D>('mlnb_add_source'),
@@ -28,7 +30,7 @@ class MapLibreBridge {
       _benchStart = lib.lookupFunction<_Str1C, _Str1D>('mlnb_bench_start'),
       _getStats = lib.lookupFunction<_StatsC, _StatsD>('mlnb_get_stats');
 
-  static const abiVersion = 6;
+  static const abiVersion = 7;
   static const eventStyleLoaded = 1;
   static const eventStyleFailed = 2;
   static const eventBenchDone = 3;
@@ -96,6 +98,8 @@ class MapLibreBridge {
   final _PtrD _destroy;
   final _GeomD _setGeometry;
   final _IntD _setVisible;
+  final _IntD _setMaxFps;
+  final _PuckD _setPuck;
   final _StyleD _setStyle;
   final _CamD _setCamera;
   final _Str2D _addSource;
@@ -207,6 +211,20 @@ class MapLibreBridge {
 
   void setVisible(Pointer<Void> map, bool visible) =>
       _setVisible(map, visible ? 1 : 0);
+
+  /// Moves the position marker there in [durationMs] at a constant speed
+  /// (0 = at once); [lat] NaN hides it; [bearing] NaN draws it as a dot.
+  void setPuck(
+    Pointer<Void> map, {
+    required double lat,
+    required double lon,
+    required double bearing,
+    required double accuracyM,
+    required int durationMs,
+  }) => _setPuck(map, lat, lon, bearing, accuracyM, durationMs);
+
+  /// At most [fps] frames a second; 0 = every frame the display takes.
+  void setMaxFps(Pointer<Void> map, int fps) => _setMaxFps(map, fps);
 
   void setStyle(Pointer<Void> map, String json, int generation) =>
       _with1(json, (p) => _setStyle(map, p, generation));
@@ -362,6 +380,10 @@ typedef _PtrC = Void Function(Pointer<Void>);
 typedef _PtrD = void Function(Pointer<Void>);
 typedef _GeomC = Void Function(Pointer<Void>, Int32, Int32, Int32, Int32);
 typedef _GeomD = void Function(Pointer<Void>, int, int, int, int);
+typedef _PuckC =
+    Void Function(Pointer<Void>, Double, Double, Double, Double, Int32);
+typedef _PuckD =
+    void Function(Pointer<Void>, double, double, double, double, int);
 typedef _IntC = Void Function(Pointer<Void>, Int32);
 typedef _IntD = void Function(Pointer<Void>, int);
 typedef _StyleC = Void Function(Pointer<Void>, Pointer<Uint8>, Int64);

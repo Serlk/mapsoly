@@ -170,6 +170,16 @@ class MapLibreViewController implements MapViewController {
     _view?._setCamera(target, durationMs: plan.ms, linear: plan.linear);
   }
 
+  int _maxFps = 0;
+
+  @override
+  void setFrameRateLimit(int? fps) {
+    final wanted = fps ?? 0;
+    if (wanted == _maxFps) return;
+    _maxFps = wanted;
+    _view?._applyMaxFps();
+  }
+
   @override
   void setPadding(EdgeInsets padding) {
     final fallback = _fallback;
@@ -310,6 +320,7 @@ class _MapLibreViewState extends State<MapLibreView>
   int _scale = 0;
 
   // Scene: what should be shown, what has been sent, what is being loaded.
+  DateTime? _puckAt;
   SceneState? _wanted;
   SceneState? _applied;
   String? _loadingStyle;
@@ -319,7 +330,8 @@ class _MapLibreViewState extends State<MapLibreView>
   final List<Timer> _trafficRemovals = [];
   // Serialising a long route on every rebuild would be wasteful: reuse the
   // string while the screen passes the same list objects.
-  Object? _routeIdentity, _alternativesIdentity, _routeTrafficIdentity;
+  Object? _routeIdentity, _routeTrafficIdentity;
+  List<List<LatLng>>? _alternativesIdentity;
   String _routesJson = SceneState.emptyGeoJson;
   Object? _heatIdentity;
   String _heatJson = SceneState.emptyGeoJson;
@@ -520,6 +532,9 @@ class _MapLibreViewState extends State<MapLibreView>
     }
     _sendCamera(widget.controller._camera!, 0, false);
     if (!widget.visible) bridge.setVisible(map, false);
+    if (widget.controller._maxFps != 0) {
+      bridge.setMaxFps(map, widget.controller._maxFps);
+    }
     _syncScene();
   }
 
@@ -569,10 +584,22 @@ class _MapLibreViewState extends State<MapLibreView>
   static String _trafficKey(TrafficOverlay t) =>
       '${t.source.name}-${t.version.replaceAll(RegExp('[^A-Za-z0-9._-]'), '_')}';
 
+  static bool _sameShapes(List<List<LatLng>> a, List<List<LatLng>>? b) {
+    if (b == null || a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (!identical(a[i], b[i])) return false;
+    }
+    return true;
+  }
+
   /// The scene as the strings the native map needs.
   SceneState _describe(MapScene scene, ColorScheme scheme) {
     if (!identical(scene.route, _routeIdentity) ||
-        !identical(scene.alternatives, _alternativesIdentity) ||
+        // The screen builds the list of alternatives anew every time: it
+        // is the shapes in it that say whether anything changed. (Compared
+        // as a list it never matched, and the whole route was written out
+        // as GeoJSON again on every rebuild.)
+        !_sameShapes(scene.alternatives, _alternativesIdentity) ||
         !identical(scene.routeTraffic, _routeTrafficIdentity)) {
       _routeIdentity = scene.route;
       _alternativesIdentity = scene.alternatives;
@@ -588,6 +615,7 @@ class _MapLibreViewState extends State<MapLibreView>
       _heatJson = heatGeoJson(scene.signalHeat);
     }
     final traffic = scene.traffic;
+    final position = scene.position;
     final colors = _colors(scheme);
     final packs = _packs(scene);
     return SceneState(
@@ -603,14 +631,22 @@ class _MapLibreViewState extends State<MapLibreView>
                 '${colors.primary}|${colors.surface}|${colors.outline}|'
                 '${scene.positionArrow.name}',
       routes: _routesJson,
+      // The position itself is the native marker below, not a feature.
       points: pointsGeoJson(
-        position: scene.position,
-        heading: scene.positionHeading,
         from: scene.from,
         to: scene.to,
         picked: scene.picked,
       ),
-      accuracy: accuracyGeoJson(scene.position, scene.positionAccuracyM),
+      puck: position == null
+          ? null
+          : PuckState(
+              // A centimetre and a degree: finer than the eye, and coarse
+              // enough for an unchanged position to stay equal.
+              lat: double.parse(position.latitude.toStringAsFixed(7)),
+              lon: double.parse(position.longitude.toStringAsFixed(7)),
+              heading: scene.positionHeading?.roundToDouble(),
+              accuracyM: (scene.positionAccuracyM ?? 0).roundToDouble(),
+            ),
       heat: _heatJson,
       traffic: traffic == null ? null : _trafficKey(traffic),
     );
@@ -683,19 +719,37 @@ class _MapLibreViewState extends State<MapLibreView>
         case LoadStyle(:final style):
           if (_loadingStyle != style) _loadStyle(style);
           return;
+        case SetPuck(:final puck):
+          final now = DateTime.now();
+          final last = _puckAt;
+          _puckAt = puck == null ? null : now;
+          // As long as the fixes are apart, so that it arrives when the
+          // next one does and never stands still in between. After a
+          // pause (or the first time) it is simply put there.
+          final since = last == null ? 0 : now.difference(last).inMilliseconds;
+          DebugStats.count('map.puck');
+          bridge.setPuck(
+            map,
+            lat: puck?.lat ?? double.nan,
+            lon: puck?.lon ?? double.nan,
+            bearing: puck?.heading ?? double.nan,
+            accuracyM: puck?.accuracyM ?? 0,
+            durationMs: since > 3000 ? 0 : since.clamp(0, 2000),
+          );
         case SetGeoJson(:final source, :final json):
           DebugStats.count('map.geojson.$source');
           bridge.setGeoJson(map, source, json);
         case SetTraffic(:final remove, :final add):
           if (add != null) {
             final id = '${MapIds.trafficPrefix}$add';
+            if (debugSkip?.hasMatch(id) ?? false) break;
             final at = add.indexOf('-');
             bridge.addSource(
               map,
               id,
               trafficSourceJson(
                 _tiles!.urlTemplate(
-                  add.substring(0, at),
+                  '${add.substring(0, at)}4',
                   add.substring(at + 1),
                 ),
               ),
@@ -949,6 +1003,12 @@ class _MapLibreViewState extends State<MapLibreView>
   }
 
   /// The camera padding changed: same target, new place on screen.
+  void _applyMaxFps() {
+    final map = _map, bridge = _bridge;
+    if (map == null || bridge == null) return;
+    bridge.setMaxFps(map, widget.controller._maxFps);
+  }
+
   void _paddingChanged() {
     final camera = widget.controller._camera;
     if (camera == null) return;

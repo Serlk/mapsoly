@@ -43,6 +43,7 @@ class AppSettings extends ChangeNotifier {
   ObdConfig _obd = const ObdConfig();
   double? _zoom;
   bool _drive3d = true;
+  bool _smoothDrive = true;
   bool _speedSound = true;
   bool _signalHeat = false;
   bool _spoofingCheck = true;
@@ -53,6 +54,18 @@ class AppSettings extends ChangeNotifier {
 
   /// Whether the camera tilts and turns along the route during guidance
   /// (on engines that can tilt). Off: the map stays flat and north-up.
+  /// Whether the map is drawn at the display's full rate while it follows
+  /// the car (the default). Off, it is held to 30 frames a second there:
+  /// a third less work for the processor on a long drive, at the price of
+  /// visibly less smooth motion.
+  bool get smoothDrive => _smoothDrive;
+
+  set smoothDrive(bool value) {
+    if (value == _smoothDrive) return;
+    _smoothDrive = value;
+    _changed();
+  }
+
   bool get drive3d => _drive3d;
 
   set drive3d(bool value) {
@@ -218,6 +231,7 @@ class AppSettings extends ChangeNotifier {
         settings._onlineLocation = json['onlineLocation'] == true;
         settings._wardriving = json['wardriving'] == true;
         settings._drive3d = json['drive3d'] != false;
+        settings._smoothDrive = json['smoothDrive'] != false;
         settings._speedSound = json['speedSound'] != false;
         settings._signalHeat = json['signalHeat'] == true;
         settings._spoofingCheck = json['spoofingCheck'] != false;
@@ -270,6 +284,7 @@ class AppSettings extends ChangeNotifier {
             'onlineLocation': _onlineLocation,
             'wardriving': _wardriving,
             'drive3d': _drive3d,
+            'smoothDrive': _smoothDrive,
             'speedSound': _speedSound,
             'signalHeat': _signalHeat,
             'spoofingCheck': _spoofingCheck,

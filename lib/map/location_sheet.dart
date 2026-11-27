@@ -84,6 +84,9 @@ class LocationSheet extends StatelessWidget {
                 // above with zeros.
                 : 'Нет связи со спутниковым приёмником: системная служба '
                       'GNSS не запущена или недоступна',
+            if (positioning?.systemGnss?.suspect ?? false)
+              'Система отбросила сигнал GPS как подменённый'
+                  '${_reason(positioning!.systemGnss!.reasonText)}',
             if (!status.spoofingCheck)
               status.spoofingSuspected
                   ? 'Проверка подмены выключена. Она бы спутникам не '
@@ -186,3 +189,5 @@ String spoofingReason(Set<GnssAnomaly> anomalies) {
   }
   return '';
 }
+
+String _reason(String text) => text.isEmpty ? '' : ': $text';

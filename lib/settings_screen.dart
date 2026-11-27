@@ -252,6 +252,19 @@ class SettingsScreen extends StatelessWidget {
                     value: settings.drive3d,
                     onChanged: (v) => settings.drive3d = v,
                   ),
+                SwitchListTile(
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: Ui.pad,
+                  ),
+                  title: const Text('Плавная карта в движении'),
+                  subtitle: const Text(
+                    'Рисовать карту с полной частотой экрана, пока она едет '
+                    'за машиной. Если выключить — 30 кадров в секунду: '
+                    'меньше нагрузка и расход батареи, но движение грубее',
+                  ),
+                  value: settings.smoothDrive,
+                  onChanged: (v) => settings.smoothDrive = v,
+                ),
                 // The marker of the position, when its direction is known.
                 Padding(
                   padding: const EdgeInsets.fromLTRB(Ui.pad, Ui.gap, Ui.pad, 4),

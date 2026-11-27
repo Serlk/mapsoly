@@ -389,7 +389,7 @@ void main() {
     final source =
         jsonDecode(trafficSourceJson('http://x/{z}/{x}/{y}.png')) as Map;
     expect(source['type'], 'raster');
-    expect(source['tileSize'], 256);
+    expect(source['tileSize'], 512);
     final layer = jsonDecode(trafficLayerJson('yandex-17')) as Map;
     expect(layer['id'], 'mapsoly-traffic-yandex-17');
     expect(layer['source'], layer['id']);

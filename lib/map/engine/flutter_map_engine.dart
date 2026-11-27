@@ -87,6 +87,9 @@ class FlutterMapViewController implements MapViewController {
   void setPadding(EdgeInsets padding) {}
 
   @override
+  void setFrameRateLimit(int? fps) {}
+
+  @override
   Listenable get cameraChanges => _changes;
 
   @override

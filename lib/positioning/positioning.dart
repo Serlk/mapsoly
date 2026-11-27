@@ -24,6 +24,7 @@ export 'sources/android_radio.dart';
 export 'sources/android_stillness.dart';
 export 'sources/linux_cell.dart';
 export 'sources/linux_compass.dart';
+export 'sources/linux_gnss_service.dart';
 export 'sources/linux_stillness.dart';
 export 'sources/linux_wifi.dart';
 export 'sources/nmea_socket_gnss.dart';

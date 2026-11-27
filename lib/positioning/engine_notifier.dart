@@ -10,10 +10,23 @@ import 'package:flutter/foundation.dart';
 import 'engine.dart';
 import 'gnss_sanity.dart';
 import 'models.dart';
+import 'sources/linux_gnss_service.dart';
 
 /// Notifies listeners whenever the engine status or estimate changes.
 class PositioningNotifier extends ChangeNotifier {
-  PositioningNotifier(this.engine) {
+  /// [system]: the verdicts of the operating system's own spoofing filter,
+  /// where it has one (see [Titan2GnssService]).
+  PositioningNotifier(this.engine, {Stream<SystemGnssVerdict>? system}) {
+    _systemSub = system?.listen((verdict) {
+      if (verdict == systemGnss) return;
+      if (verdict.suspect != (systemGnss?.suspect ?? false)) {
+        debugPrint(
+          'system gnss: ${verdict.state} ${verdict.reason.split(':').first}',
+        );
+      }
+      systemGnss = verdict;
+      details.notifyListeners();
+    }, onError: (Object _) {});
     _sub = engine.statusStream.listen((status) {
       _logGnssHealth(status.gnssHealth);
       _logRadio(status);
@@ -33,6 +46,12 @@ class PositioningNotifier extends ChangeNotifier {
   }
 
   Object? _shown, _shownDetails;
+  StreamSubscription<SystemGnssVerdict>? _systemSub;
+
+  /// The system's own verdict on spoofing, null when it gives none. While
+  /// it suspects spoofing the app receives no position from the satellites
+  /// at all.
+  SystemGnssVerdict? systemGnss;
 
   /// Fires on every visible change, counters included: for a screen that
   /// shows them (the location sheet). The notifier itself fires only for
@@ -139,6 +158,7 @@ class PositioningNotifier extends ChangeNotifier {
   @override
   void dispose() {
     unawaited(_sub.cancel());
+    unawaited(_systemSub?.cancel());
     details.dispose();
     super.dispose();
   }

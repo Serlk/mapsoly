@@ -14,14 +14,41 @@ import '../../../traffic/yandex_tile_provider.dart';
 class TileRequest {
   const TileRequest(this.kind, this.version, this.z, this.x, this.y);
 
-  /// `osm`, `google`, `yandex` or `packs`.
+  /// `osm`, `google`, `yandex` or `packs`; `google4` and `yandex4` are
+  /// the same traffic with four tiles of the next zoom put together in one
+  /// (see [quad]).
   final String kind;
+
+  /// A traffic tile made of the four tiles one zoom level deeper. The map
+  /// draws every tile of every layer with a call of its own, and each call
+  /// costs the same whatever it draws: the same picture in a quarter of
+  /// the tiles is a quarter of the work.
+  bool get quad => kind == 'google4' || kind == 'yandex4';
+
+  /// The four tiles a [quad] is made of, with where each goes (0 or 1
+  /// across and down).
+  List<(TileRequest, int, int)> get quarters => [
+    for (var dy = 0; dy < 2; dy++)
+      for (var dx = 0; dx < 2; dx++)
+        (
+          TileRequest(
+            kind.substring(0, kind.length - 1),
+            version,
+            z + 1,
+            2 * x + dx,
+            2 * y + dy,
+          ),
+          dx,
+          dy,
+        ),
+  ];
 
   /// Data version of a traffic layer, id of a pack set; empty for `osm`.
   final String version;
   final int z, x, y;
 
-  /// Parses `/osm/{z}/{x}/{y}.png`, `/{google|yandex}/{version}/{z}/{x}/{y}.png`
+  /// Parses `/osm/{z}/{x}/{y}.png`,
+  /// `/{google|yandex|google4|yandex4}/{version}/{z}/{x}/{y}.png`
   /// and `/packs/{set}/{z}/{x}/{y}.pbf`.
   /// Null for anything else, including coordinates outside the tile pyramid.
   static TileRequest? parse(String path) {
@@ -31,7 +58,13 @@ class TileRequest {
     final String version;
     if (kind == 'osm' && parts.length == 4) {
       version = '';
-    } else if ((kind == 'google' || kind == 'yandex' || kind == 'packs') &&
+    } else if (const {
+          'google',
+          'yandex',
+          'google4',
+          'yandex4',
+          'packs',
+        }.contains(kind) &&
         parts.length == 5) {
       version = parts[1];
       if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]*$').hasMatch(version)) {
@@ -159,6 +192,7 @@ class MapTileServer {
   }
 
   Future<List<int>?> _load(TileRequest tile) async {
+    if (tile.quad) return _loadQuad(tile);
     final client = tile.kind == 'osm' ? _own : (trafficClient ?? _own);
     final upstream = tile.upstream;
     if (upstream != null) {
@@ -182,6 +216,63 @@ class MapTileServer {
     final png = await image.toByteData(format: ui.ImageByteFormat.png);
     image.dispose();
     return png?.buffer.asUint8List();
+  }
+
+  /// One quarter of a quad as a picture, null where there is no traffic.
+  Future<ui.Image?> _quarter(TileRequest tile) async {
+    try {
+      if (tile.kind == 'yandex') {
+        return await composeYandexTrafficTile(
+          trafficClient ?? _own,
+          tile.version,
+          tile.x,
+          tile.y,
+          tile.z,
+        );
+      }
+      final bytes = await _load(tile);
+      if (bytes == null) return null;
+      final codec = await ui.instantiateImageCodec(Uint8List.fromList(bytes));
+      return (await codec.getNextFrame()).image;
+    } on Exception {
+      return null;
+    }
+  }
+
+  Future<List<int>?> _loadQuad(TileRequest tile) async {
+    final parts = tile.quarters;
+    final images = await Future.wait([for (final q in parts) _quarter(q.$1)]);
+    try {
+      final side = images.nonNulls.fold(0, (m, i) => i.width > m ? i.width : m);
+      if (side == 0) return null;
+      final recorder = ui.PictureRecorder();
+      final canvas = ui.Canvas(recorder);
+      for (var i = 0; i < parts.length; i++) {
+        final image = images[i];
+        if (image == null) continue;
+        canvas.drawImageRect(
+          image,
+          ui.Rect.fromLTWH(0, 0, image.width + 0.0, image.height + 0.0),
+          ui.Rect.fromLTWH(
+            parts[i].$2 * side + 0.0,
+            parts[i].$3 * side + 0.0,
+            side + 0.0,
+            side + 0.0,
+          ),
+          ui.Paint(),
+        );
+      }
+      final picture = recorder.endRecording();
+      final whole = await picture.toImage(2 * side, 2 * side);
+      picture.dispose();
+      final png = await whole.toByteData(format: ui.ImageByteFormat.png);
+      whole.dispose();
+      return png?.buffer.asUint8List();
+    } finally {
+      for (final image in images) {
+        image?.dispose();
+      }
+    }
   }
 }
 

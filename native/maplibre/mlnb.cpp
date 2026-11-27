@@ -779,6 +779,107 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
     std::unique_ptr<mln::Map> map;
     std::unique_ptr<mln::util::AsyncTask> asyncTick;
     std::unique_ptr<mln::util::Timer> pollTimer;
+    // The position marker (mlnb_set_puck): one point feature in the GeoJSON source
+    // "mapsoly-puck" (the style draws it as a dot or an arrow) and its accuracy circle in
+    // "mapsoly-accuracy", moved here every frame from where it is to where it was last
+    // told to be, at a constant speed over the given time. The camera, when it follows, is eased over the
+    // same time the same way, so the marker stays put on the screen while the map moves
+    // under it. (MapLibre's own `location-indicator` layer would be cheaper, but drew
+    // nothing on Mali/Panfrost, and its transitions always ease out.)
+    struct Puck {
+        bool known = false;      // has a place at all
+        bool animating = false;
+        bool restyle = true;     // image or visibility to be set again
+        double lat = 0, lon = 0, bearing = 0, accuracy = 0;        // as shown now
+        double ringLat = 0, ringLon = 0, ringAccuracy = -1;       // the circle as last drawn
+        int64_t lastStepUs = 0;
+        bool hasBearing = false;
+        double fromLat = 0, fromLon = 0, fromBearing = 0, fromAccuracy = 0;
+        double toLat = 0, toLon = 0, toBearing = 0, toAccuracy = 0;
+        int64_t startUs = 0, durationUs = 0;
+    } puck;
+    static constexpr const char* kPuckSource = "mapsoly-puck";
+    static constexpr const char* kAccuracySource = "mapsoly-accuracy";
+    static constexpr int64_t kPuckStepUs = 33000;
+    bool puckArmed = false;
+    std::unique_ptr<mln::util::Timer> puckTimer;
+
+    // Moves the marker to where it should be now. True while it is still on its way.
+    bool stepPuck() {
+        if (!map) return false;
+        auto& style = map->getStyle();
+        auto* pointSrc = style.getSource(kPuckSource);
+        auto* point = pointSrc ? pointSrc->as<mln::style::GeoJSONSource>() : nullptr;
+        if (!point) {
+            puck.restyle = true; // the style was replaced: set everything again later
+            return false;
+        }
+        auto* ringSrc = style.getSource(kAccuracySource);
+        auto* ring = ringSrc ? ringSrc->as<mln::style::GeoJSONSource>() : nullptr;
+        puck.restyle = false;
+        puck.lastStepUs = monoUs();
+        if (!puck.known) {
+            const mapbox::feature::feature_collection<double> none;
+            point->setGeoJSON(mln::GeoJSON{none});
+            if (ring) ring->setGeoJSON(mln::GeoJSON{none});
+            return false;
+        }
+        double t = 1;
+        if (puck.animating && puck.durationUs > 0) {
+            t = static_cast<double>(monoUs() - puck.startUs) / static_cast<double>(puck.durationUs);
+        }
+        if (t >= 1) {
+            t = 1;
+            puck.animating = false;
+        }
+        const double turn = std::remainder(puck.toBearing - puck.fromBearing, 360.0); // shortest way
+        puck.lat = puck.fromLat + (puck.toLat - puck.fromLat) * t;
+        puck.lon = puck.fromLon + (puck.toLon - puck.fromLon) * t;
+        puck.bearing = puck.fromBearing + turn * t;
+        puck.accuracy = puck.fromAccuracy + (puck.toAccuracy - puck.fromAccuracy) * t;
+
+        mapbox::feature::feature<double> f{mapbox::geometry::point<double>{puck.lon, puck.lat}};
+        f.properties["kind"] = std::string(puck.hasBearing ? "position-heading" : "position");
+        if (puck.hasBearing) f.properties["heading"] = puck.bearing;
+        point->setGeoJSON(mln::GeoJSON{f});
+
+        // The accuracy circle: a ring of that many metres on the ground. Redone only when
+        // it would look different, a polygon being dearer to rebuild than a point.
+        // It is also left behind while the marker is on its way and caught up when it
+        // has arrived: a big faint circle a second late is not seen, and redoing it
+        // every frame cost as much as the rest of the map together.
+        if (ring && !puck.animating &&
+            (std::abs(puck.lat - puck.ringLat) > 1e-7 || std::abs(puck.lon - puck.ringLon) > 1e-7 ||
+             std::abs(puck.accuracy - puck.ringAccuracy) > 0.25)) {
+            puck.ringLat = puck.lat;
+            puck.ringLon = puck.lon;
+            puck.ringAccuracy = puck.accuracy;
+            if (puck.accuracy < 1) {
+                ring->setGeoJSON(mln::GeoJSON{mapbox::feature::feature_collection<double>{}});
+            } else {
+                constexpr int kSteps = 48;
+                constexpr double kPi = 3.14159265358979323846;
+                const double dLat = puck.accuracy / 111320.0;
+                const double dLon = dLat / std::max(0.01, std::cos(puck.lat * kPi / 180.0));
+                mapbox::geometry::linear_ring<double> r;
+                r.reserve(kSteps + 1);
+                for (int i = 0; i <= kSteps; ++i) {
+                    const double a = 2 * kPi * i / kSteps;
+                    r.emplace_back(puck.lon + dLon * std::sin(a), puck.lat + dLat * std::cos(a));
+                }
+                mapbox::geometry::polygon<double> poly;
+                poly.push_back(std::move(r));
+                ring->setGeoJSON(mln::GeoJSON{mapbox::feature::feature<double>{std::move(poly)}});
+            }
+        }
+        return puck.animating;
+    }
+
+    // Frame rate cap (mlnb_set_max_fps): the least time between two frames, 0 = none.
+    int64_t minFrameUs = 0;
+    int64_t lastRenderUs = 0;
+    bool paceArmed = false;
+    std::unique_ptr<mln::util::Timer> paceTimer;
     std::shared_ptr<mln::UpdateParameters> updateParameters;
     bool dirty = false, inTick = false, visible = true, failed = false;
     int renderErrors = 0;
@@ -854,6 +955,39 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
             benchWasActive = false;
             emit(MLNB_EVENT_BENCH_DONE, 0);
         }
+        // The marker on its way: its next place before the frame is drawn. Setting it
+        // marks the map dirty, which keeps the frames coming until it has arrived.
+        // Thirty times a second is as often as it is worth: at motorway speed that is
+        // steps of a third of a pixel, and every step re-lays the marker's tile.
+        if (visible && (puck.animating || puck.restyle)) {
+            const int64_t wait = puck.lastStepUs + kPuckStepUs - monoUs();
+            if (wait <= 0 || puck.restyle) {
+                stepPuck();
+            } else if (!puckArmed && puckTimer) {
+                // Nothing else may be moving: come back by ourselves.
+                puckArmed = true;
+                puckTimer->start(mln::Milliseconds((wait + 999) / 1000), mln::Duration::zero(), [this] {
+                    puckArmed = false;
+                    tick();
+                });
+            }
+        }
+        if (minFrameUs > 0 && visible && dirty && !bench.active()) {
+            // Capped: too early for the next frame. Come back when it is due instead of
+            // drawing every frame the compositor would take.
+            const int64_t wait = lastRenderUs + minFrameUs - monoUs();
+            if (wait > 1500) {
+                if (!paceArmed && paceTimer) {
+                    paceArmed = true;
+                    paceTimer->start(mln::Milliseconds((wait + 999) / 1000), mln::Duration::zero(), [this] {
+                        paceArmed = false;
+                        tick();
+                    });
+                }
+                inTick = false;
+                return;
+            }
+        }
         if (visible && dirty && updateParameters && backend->canRender() && !failed) {
             // MapLibre throws from deep inside a frame now and then (seen: "out of range
             // destination coordinates for image copy" from its pattern atlas). One bad
@@ -874,6 +1008,7 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
 
     void render() {
         const int64_t start = monoUs();
+        lastRenderUs = start;
         mln::gfx::BackendScope guard{*backend, mln::gfx::BackendScope::ScopeType::Implicit};
         dirty = false;
         auto params = updateParameters;
@@ -928,6 +1063,24 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
                     .withPixelRatio(ratio),
                 resourceOptions, mln::ClientOptions());
             map->setBounds(mln::BoundOptions().withMinZoom(1.0).withMaxZoom(20.0).withMaxPitch(60.0));
+            // Level of detail in a tilted view is left as MapLibre has it (off up to 60
+            // degrees of pitch, which is all this map tilts). Coarser tiles further away
+            // were tried: about a tenth fewer draw calls, and the raster traffic overlay
+            // came from a zoom level where its lines are generalised and no longer follow
+            // the roads. MLNB_LOD="minRadius,scale,pitchDeg,zoomShift,mode" (mode 1 = by
+            // distance) turns it on for experiments.
+            if (const char* e = std::getenv("MLNB_LOD")) {
+                double radius = 3, lodScale = 1, pitchDeg = 60, shift = 0;
+                int mode = 0;
+                std::sscanf(e, "%lf,%lf,%lf,%lf,%d", &radius, &lodScale, &pitchDeg, &shift, &mode);
+                map->setTileLodMinRadius(radius);
+                map->setTileLodScale(lodScale);
+                map->setTileLodPitchThreshold(pitchDeg / 180.0 * 3.14159265358979);
+                map->setTileLodZoomShift(shift);
+                map->setTileLodMode(mode == 1 ? mln::TileLodMode::Distance : mln::TileLodMode::Default);
+                MLNB_LOG("mlnb: lod radius %.1f scale %.2f pitch %.0f shift %.1f mode %d\n", radius, lodScale,
+                         pitchDeg, shift, mode);
+            }
 
             asyncTick = std::make_unique<mln::util::AsyncTask>([this] { tick(); });
             backend->onFrame = [this] {
@@ -941,6 +1094,8 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
 #endif
             // ... and a slow poll, because another thread (GTK) may have read our events
             // off the socket while this one was busy; also drives the benchmark script.
+            paceTimer = std::make_unique<mln::util::Timer>();
+            puckTimer = std::make_unique<mln::util::Timer>();
             pollTimer = std::make_unique<mln::util::Timer>();
             pollTimer->start(mln::Milliseconds(8), mln::Milliseconds(8), [this] {
                 if (backend->stalled || bench.active()) tick();
@@ -973,6 +1128,8 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
             runLoop.removeWatch(backend->fd());
 #endif
             pollTimer.reset();
+            paceTimer.reset();
+            puckTimer.reset();
             asyncTick.reset();
             map.reset();
             renderer.reset();
@@ -1362,6 +1519,49 @@ void mlnb_add_image(mlnb_map* m, const char* id, const uint8_t* rgba, int32_t wi
     m->post([m, i = std::move(i), pixels, pixel_ratio] {
         m->map->getStyle().addImage(std::make_unique<mln::style::Image>(
             i, mln::util::premultiply(std::move(*pixels)), static_cast<float>(pixel_ratio)));
+    });
+}
+
+void mlnb_set_puck(mlnb_map* m, double lat, double lon, double bearing, double accuracy_m, int32_t duration_ms) {
+    MLNB_CALL();
+    m->post([=] {
+        auto& p = m->puck;
+        const bool had = p.known;
+        if (std::isnan(lat) || std::isnan(lon)) {
+            if (!had) return;
+            p.known = false;
+            p.animating = false;
+            p.ringAccuracy = -1;
+        } else {
+            p.known = true;
+            p.hasBearing = !std::isnan(bearing);
+            // Without a direction the marker keeps the one it had, unseen.
+            const double b = p.hasBearing ? bearing : p.bearing;
+            const double a = std::isnan(accuracy_m) || accuracy_m < 0 ? 0.0 : accuracy_m;
+            // From where it is now, also in the middle of the previous move.
+            const bool jump = !had || duration_ms <= 0;
+            p.fromLat = jump ? lat : p.lat;
+            p.fromLon = jump ? lon : p.lon;
+            p.fromBearing = jump ? b : p.bearing;
+            p.fromAccuracy = jump ? a : p.accuracy;
+            p.toLat = lat;
+            p.toLon = lon;
+            p.toBearing = b;
+            p.toAccuracy = a;
+            p.startUs = monoUs();
+            p.durationUs = jump ? 0 : static_cast<int64_t>(duration_ms) * 1000;
+            p.animating = true;
+        }
+        m->stepPuck();
+        if (m->asyncTick) m->asyncTick->send();
+    });
+}
+
+void mlnb_set_max_fps(mlnb_map* m, int32_t fps) {
+    MLNB_CALL();
+    m->post([=] {
+        m->minFrameUs = fps > 0 ? 1000000 / fps : 0;
+        if (m->asyncTick) m->asyncTick->send();
     });
 }
 

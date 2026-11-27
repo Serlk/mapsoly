@@ -289,6 +289,11 @@ class FakeMapController extends ChangeNotifier implements MapViewController {
   @override
   void setPadding(EdgeInsets padding) => this.padding = padding;
 
+  int? frameRateLimit;
+
+  @override
+  void setFrameRateLimit(int? fps) => frameRateLimit = fps;
+
   @override
   void fit(List<LatLng> points, EdgeInsets padding) => fitted = points;
 

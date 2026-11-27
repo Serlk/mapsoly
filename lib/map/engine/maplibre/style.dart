@@ -6,6 +6,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:io';
 
 /// Colours of the overlay layers, as CSS colour strings.
 class OverlayColors {
@@ -46,6 +47,11 @@ abstract final class MapIds {
   static const pinPicked = 'mapsoly-pin-picked';
   static const arrow = 'mapsoly-arrow';
 
+  /// Source of the position marker. The native side writes it, every
+  /// frame while the marker moves (see `mlnb_set_puck`), and the accuracy
+  /// circle in [accuracy] with it.
+  static const puck = 'mapsoly-puck';
+
   /// Lowest overlay layer: traffic goes right below it (above the roads,
   /// below the route and the labels).
   static const firstOverlayLayer = 'mapsoly-alt-casing';
@@ -55,9 +61,10 @@ abstract final class MapIds {
 
 const _emptyCollection = {'type': 'FeatureCollection', 'features': <Object>[]};
 
-Map<String, Object> _geoJsonSource() => {
+Map<String, Object> _geoJsonSource({bool synchronous = false}) => {
   'type': 'geojson',
   'data': _emptyCollection,
+  if (synchronous) 'synchronousUpdate': true,
 };
 
 /// Traffic colours on the route line, by [Congestion] name.
@@ -201,7 +208,7 @@ List<Map<String, Object>> markerLayers(OverlayColors c) => [
   {
     'id': 'mapsoly-position',
     'type': 'circle',
-    'source': MapIds.points,
+    'source': MapIds.puck,
     'filter': ['==', 'kind', 'position'],
     'paint': {
       'circle-radius': 7,
@@ -215,7 +222,7 @@ List<Map<String, Object>> markerLayers(OverlayColors c) => [
     // turned to the heading.
     'id': 'mapsoly-position-arrow',
     'type': 'symbol',
-    'source': MapIds.points,
+    'source': MapIds.puck,
     'filter': ['==', 'kind', 'position-heading'],
     'layout': {
       'icon-image': MapIds.arrow,
@@ -303,7 +310,10 @@ void _addOverlays(
   final sources = style['sources'] as Map<String, dynamic>;
   sources[MapIds.routes] = _geoJsonSource();
   sources[MapIds.points] = _geoJsonSource();
-  sources[MapIds.accuracy] = _geoJsonSource();
+  // Rewritten every frame while the marker moves: taken at once, not
+  // queued behind the tile workers.
+  sources[MapIds.accuracy] = _geoJsonSource(synchronous: true);
+  sources[MapIds.puck] = _geoJsonSource(synchronous: true);
   final layers = (style['layers'] as List).cast<Map<String, dynamic>>();
   // Above every road and below the labels that follow them: right after the
   // last road or rail layer (labels of the roads come later in both styles).
@@ -360,6 +370,7 @@ String buildVectorStyle({
       buildingsLayer(buildingsColor(name, style)),
     );
   }
+  debugSkipLayers(style);
   return jsonEncode(style);
 }
 
@@ -425,15 +436,19 @@ String buildRasterStyle({
 String trafficSourceJson(String tilesUrl) => jsonEncode({
   'type': 'raster',
   'tiles': [tilesUrl],
-  // The tiles are 512 px: sharp on dense screens.
-  'tileSize': 256,
-  'maxzoom': 19,
+  // Each tile is four of the provider's put together by the tile server
+  // (see TileRequest.quad), 1024 px across: as sharp on a dense screen as
+  // they were one by one, in a quarter of the draw calls.
+  'tileSize': 512,
+  'maxzoom': 18,
 });
 
 String trafficLayerJson(String key) => jsonEncode({
   'id': '${MapIds.trafficPrefix}$key',
   'type': 'raster',
   'source': '${MapIds.trafficPrefix}$key',
+  // No cross-fade: while it lasts both the old and the new tile are drawn.
+  'paint': {'raster-fade-duration': 0},
 });
 
 /// Colour of the style's `background` layer as 0xAARRGGBB, or null when the
@@ -466,4 +481,19 @@ int? styleBackgroundColor(String styleJson) {
     return null;
   }
   return null;
+}
+
+/// Debug hook `MAPSOLY_MAP_SKIP=<regexp>`: leaves out the style layers whose
+/// id matches, to measure what each group of layers costs to draw.
+final RegExp? debugSkip = () {
+  final pattern = Platform.environment['MAPSOLY_MAP_SKIP'];
+  return pattern == null || pattern.isEmpty ? null : RegExp(pattern);
+}();
+
+void debugSkipLayers(Map<String, dynamic> style) {
+  final skip = debugSkip;
+  if (skip == null) return;
+  (style['layers'] as List).removeWhere(
+    (l) => skip.hasMatch((l as Map)['id'] as String),
+  );
 }

@@ -245,6 +245,15 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   }
 
   /// Once per position update: is the car moving, and on what road.
+  /// The map follows the car: 30 frames a second are enough there, unless
+  /// the settings ask for all of them.
+  void _applyFrameRate() {
+    final following = (_driving || _cruising) && _follow.following;
+    _map.setFrameRateLimit(
+      following && !widget.settings.smoothDrive ? 30 : null,
+    );
+  }
+
   void _trackDriving() {
     final speed = _speedKmh;
     final wasHidden = _chromeHidden;
@@ -265,6 +274,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
       _cruising = cruising;
       _applyCruise();
     }
+    _applyFrameRate();
     final at = progress?.point ?? _route.myPosition;
     if (at == null || speed == null || speed < 5) {
       if (!_chrome.moving) _speedLimit.reset();
@@ -534,6 +544,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     if (_driving) {
       final wasFollowing = _follow.following;
       _follow.userMoved(DateTime.now());
+      _applyFrameRate();
       if (wasFollowing) setState(() {});
     } else if (pan && _locationMode != LocationMode.free) {
       _setLocationMode(LocationMode.free);
@@ -911,7 +922,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
       to: _route.to,
       picked: _picked,
       position: position,
-      positionAccuracyM: _steadyAccuracy.of(fix?.accuracyM, DateTime.now()),
+      positionAccuracyM: _shownAccuracy(fix),
       // Along the route when guided, along the course when moving, else
       // where the device points.
       positionHeading: _route.progress != null
@@ -926,6 +937,17 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   }
 
   final _steadyAccuracy = SteadyAccuracy();
+
+  /// The radius of the accuracy circle, or null for none. The circle is
+  /// there to say "somewhere around here" when the position comes from
+  /// Wi-Fi or cells; with a proper satellite fix it only gets in the way.
+  double? _shownAccuracy(PositionEstimate? fix) {
+    final radius = _steadyAccuracy.of(fix?.accuracyM, DateTime.now());
+    if (fix == null || radius == null) return null;
+    final satellites =
+        fix.source == PositionSource.gnss || fix.source == PositionSource.fused;
+    return satellites && radius <= 30 ? null : radius;
+  }
 
   /// Whether the route begins where the device is (or is being driven).
   bool _startsHere(LatLng? position) {
@@ -1003,7 +1025,12 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
       if (engine != null) {
         // Before anything is collected or sent: the privacy zones.
         widget.user.guard.attach(engine);
-        final notifier = PositioningNotifier(engine)..addListener(_onPosition);
+        final notifier = PositioningNotifier(
+          engine,
+          system: Platform.isLinux && widget.testHooks == null
+              ? Titan2GnssService().verdicts
+              : null,
+        )..addListener(_onPosition);
         if (!mounted) {
           notifier.dispose();
           if (hooks == null) await engine.dispose();
@@ -2136,9 +2163,16 @@ class MapButtons extends StatelessWidget {
         ),
         // The compass sits under the buttons and keeps its place while
         // hidden, so they do not jump when it appears.
-        ListenableBuilder(
+        // The camera reports thirty times a second while it moves; the
+        // button changes only with the direction (to a degree) and with
+        // whether the map is tilted at all.
+        _Selected<(int, bool)>(
           listenable: camera.cameraChanges,
-          builder: (context, _) {
+          select: () => (
+            camera.ready ? (camera.bearing * 2).round() : 0,
+            camera.ready && camera.pitch > 1,
+          ),
+          builder: (context) {
             final bearing = camera.ready ? camera.bearing : 0.0;
             final pitch = camera.ready ? camera.pitch : 0.0;
             final turned = angleDelta(0, bearing).abs() > 0.5;
@@ -2268,4 +2302,56 @@ class TrafficChip extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Rebuilds [builder] when [select] gives a new value after [listenable]
+/// fired, not every time it fires.
+class _Selected<T> extends StatefulWidget {
+  const _Selected({
+    required this.listenable,
+    required this.select,
+    required this.builder,
+  });
+
+  final Listenable listenable;
+  final T Function() select;
+  final WidgetBuilder builder;
+
+  @override
+  State<_Selected<T>> createState() => _SelectedState<T>();
+}
+
+class _SelectedState<T> extends State<_Selected<T>> {
+  late T _value = widget.select();
+
+  @override
+  void initState() {
+    super.initState();
+    widget.listenable.addListener(_check);
+  }
+
+  @override
+  void didUpdateWidget(_Selected<T> old) {
+    super.didUpdateWidget(old);
+    if (old.listenable != widget.listenable) {
+      old.listenable.removeListener(_check);
+      widget.listenable.addListener(_check);
+    }
+    _value = widget.select();
+  }
+
+  void _check() {
+    final next = widget.select();
+    if (next == _value) return;
+    setState(() => _value = next);
+  }
+
+  @override
+  void dispose() {
+    widget.listenable.removeListener(_check);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context);
 }

@@ -160,6 +160,12 @@ abstract class MapViewController {
   /// keep the position in the lower third while driving and clear of UI.
   void setPadding(EdgeInsets padding);
 
+  /// Caps how many frames a second the map draws while it animates; null
+  /// lifts the cap. For a camera that follows the car for hours: every
+  /// frame costs processor time, and 30 a second look the same on the road.
+  /// Engines that cannot do it ignore the call.
+  void setFrameRateLimit(int? fps);
+
   /// Notifies when bearing, pitch, zoom or centre change (also by gestures),
   /// at most ~30 times a second: drives the compass button.
   Listenable get cameraChanges;
