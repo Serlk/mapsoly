@@ -563,7 +563,32 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     _map.moveCamera(bearing: _heading.update(heading));
   }
 
+  /// True when the map is centred on the position (within a thumb's
+  /// width on screen).
+  bool _centredOn(LatLng p) {
+    if (!_map.ready) return false;
+    final metresPerPixel =
+        156543.03 *
+        math.cos(p.latitude * math.pi / 180) /
+        math.pow(2, _map.zoom);
+    return const Distance().as(LengthUnit.Meter, _map.center, p) <
+        40 * metresPerPixel;
+  }
+
   void _northUp() {
+    // First to where I am; the button changes the mode only from there,
+    // so the map never starts turning around some other place.
+    final fix = _positioning?.estimate;
+    if (fix != null && !_driving) {
+      final here = LatLng(fix.lat, fix.lon);
+      if (!_centredOn(here)) {
+        _map.move(here, _map.zoom < 14 ? 15.0 : _map.zoom);
+        if (_locationMode == LocationMode.free) {
+          _setLocationMode(LocationMode.centered);
+        }
+        return;
+      }
+    }
     if (_compassMode) {
       _setCompassMode(false);
       _map.moveCamera(bearing: 0);

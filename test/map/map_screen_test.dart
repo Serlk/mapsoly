@@ -487,6 +487,21 @@ void main() {
     await tester.tap(find.byTooltip('Карта по компасу: выключить'));
     await tester.pumpAndSettle();
     expect(map.bearing, 0);
+
+    // With a position somewhere else on the map, the first tap only goes
+    // there; the mode changes with the next one.
+    await fix(tester, smolny);
+    expect(map.center.latitude, isNot(closeTo(smolny.latitude, 1e-3)));
+    await tester.tap(find.byTooltip('Поворачивать карту по компасу'));
+    await tester.pumpAndSettle();
+    expect(map.center.latitude, closeTo(smolny.latitude, 1e-4));
+    expect(find.byTooltip('Карта по компасу: выключить'), findsNothing);
+    await tester.tap(find.byTooltip('Поворачивать карту по компасу'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Карта по компасу: выключить'), findsOneWidget);
+    await tester.tap(find.byTooltip('Карта по компасу: выключить'));
+    await tester.pumpAndSettle();
+    expect(map.bearing, 0);
     // The compass keeps running for the arrow on the map, which needs a
     // position; the map itself no longer turns.
     compass.controller.add(180);
