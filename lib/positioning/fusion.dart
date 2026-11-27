@@ -373,6 +373,18 @@ class FusionFilter {
     _lastSpeed = _t;
   }
 
+  /// Says the device is not moving right now (it lies still, by its motion
+  /// sensors). Pins the velocity to zero, so the position stays where the
+  /// last fix put it instead of drifting into "could be anywhere by now".
+  ///
+  /// Unlike [addSpeed] it does not count as a speed source: the estimate
+  /// stays labelled by what gave the position.
+  void addStationary(DateTime time, {double sigma = 0.2}) {
+    if (_proj == null) return;
+    _predict(_clampTime(time));
+    _zeroVelocity(sigma * sigma);
+  }
+
   /// Feeds a full velocity: speed from the vehicle and heading from the
   /// motion sensors (degrees clockwise from north). This is what lets the
   /// position advance between radio fixes (dead reckoning).

@@ -144,6 +144,12 @@ class OnlineResolver {
   /// the negative cache. One request: the strongest unknown AP goes first so
   /// Apple returns its neighbourhood, which usually covers the next scans
   /// too. Returns the number of records written.
+  /// Outcome of the latest answered Wi-Fi lookup, in numbers: how many
+  /// access points were asked about, how many records came back (Apple adds
+  /// the neighbourhood) and how many of the asked ones were among them.
+  /// For diagnostics; null before the first answer.
+  ({int asked, int returned, int matched})? lastWifiLookup;
+
   Future<int> resolveWifi(List<WifiObservation> scan) async {
     final candidates =
         [
@@ -169,6 +175,11 @@ class OnlineResolver {
     }
     final written = _storeApple(r.found);
     final got = {for (final a in r.found) a.bssid};
+    lastWifiLookup = (
+      asked: ask.length,
+      returned: r.found.length,
+      matched: ask.where(got.contains).length,
+    );
     // Only what Apple explicitly reported unknown (or silently dropped from
     // a successful answer) is negative-cached.
     db.markUnknown(TransmitterKind.wifi, [

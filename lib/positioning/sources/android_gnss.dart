@@ -26,9 +26,28 @@ const _systems = {
 
 /// Turns one event of the `mapsoly/android/location` stream into a fix.
 /// An event without coordinates is an epoch without a position.
+///
+/// [now] is the local clock at arrival. The fix is dated by `at`, the
+/// platform's own record of when it was taken (system clock, not the
+/// receiver's time): events can sit in the queue while the app is busy, and
+/// two fixes handed over together would otherwise look like a jump of
+/// their whole distance in no time, which is what the spoofing check
+/// looks for. An `at` from the future or implausibly old is not believed.
 @visibleForTesting
-GnssFix fixFromAndroid(Map<Object?, Object?> event, DateTime receivedAt) {
+GnssFix fixFromAndroid(Map<Object?, Object?> event, DateTime now) {
   double? number(String key) => (event[key] as num?)?.toDouble();
+  var receivedAt = now;
+  final at = event['at'];
+  if (at is num) {
+    final taken = DateTime.fromMillisecondsSinceEpoch(
+      at.toInt(),
+      isUtc: now.isUtc,
+    );
+    final age = now.difference(taken);
+    if (!age.isNegative && age <= const Duration(seconds: 30)) {
+      receivedAt = taken;
+    }
+  }
   final satellites = <GnssSatellite>[
     for (final s in (event['sats'] as List<Object?>? ?? const []))
       if (s is List && s.length >= 6)
@@ -92,6 +111,7 @@ class AndroidGnssSource implements GnssSource, LocationAccess {
   StreamSubscription<Object?>? _sub;
   AppLifecycleListener? _lifecycle;
   bool _running = false;
+  bool _asked = false;
 
   @override
   Stream<GnssFix> get fixes => _fixes.stream;
@@ -110,8 +130,12 @@ class AndroidGnssSource implements GnssSource, LocationAccess {
     try {
       if (await _permissions.has(AndroidPermissions.location)) {
         await _listen();
-      } else {
-        // Not awaited by the engine's start: the dialog may stay open.
+      } else if (!_asked) {
+        // Once per run: the source is restarted every time the app comes
+        // back to the screen, and a refusal must not bring the dialog up
+        // again each time. Not awaited by the engine's start: the dialog
+        // may stay open.
+        _asked = true;
         unawaited(_ask());
       }
     } on Object catch (e) {
@@ -191,7 +215,9 @@ class AndroidGnssSource implements GnssSource, LocationAccess {
       (event) {
         if (event is! Map || _fixes.isClosed) return;
         if (event['off'] == true) {
-          _state.value = LocationAccessState.switchedOff;
+          // The satellite provider went away; whether that is the whole
+          // system's location switch is a separate question.
+          unawaited(_readSwitch().catchError((Object _) {}));
         } else if (event['lat'] != null) {
           _state.value = LocationAccessState.granted;
         }

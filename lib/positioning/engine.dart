@@ -291,6 +291,10 @@ class PositioningEngine {
   /// Latest unfiltered radio estimate with its counters.
   RadioEstimate get lastRadioEstimate => _radio;
 
+  /// See [OnlineResolver.lastWifiLookup].
+  ({int asked, int returned, int matched})? get lastWifiLookup =>
+      _resolver?.lastWifiLookup;
+
   /// Whether transmitter observations are written to the database while a
   /// trusted GNSS fix is available.
   bool get wardriving => _wardriving;
@@ -359,6 +363,12 @@ class PositioningEngine {
   /// External speed-over-ground input in m/s (OBD, wheel sensor).
   void addSpeedSample(double speedMps, {DateTime? time}) {
     _filter.addSpeed(speedMps, time ?? _now());
+  }
+
+  /// The device is lying still right now (motion sensors): the position
+  /// does not drift between radio fixes.
+  void addStationarySample({DateTime? time}) {
+    _filter.addStationary(time ?? _now());
   }
 
   /// External speed and heading (OBD speed plus gyro heading): advances the

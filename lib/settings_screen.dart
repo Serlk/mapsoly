@@ -33,7 +33,6 @@ class SettingsScreen extends StatelessWidget {
     required this.onOpenPacks,
     this.showSensors = false,
     this.locationAccess,
-    this.radioPositioning = true,
     required this.user,
     required this.services,
     required this.files,
@@ -54,9 +53,6 @@ class SettingsScreen extends StatelessWidget {
 
   /// See [LocationSheet.access].
   final LocationAccess? locationAccess;
-
-  /// See [LocationSheet.radio].
-  final bool radioPositioning;
   final UserData user;
   final MapServices services;
   final FileExchange files;
@@ -316,7 +312,6 @@ class SettingsScreen extends StatelessWidget {
                         settings: settings,
                         showTitle: false,
                         access: locationAccess,
-                        radio: radioPositioning,
                       ),
                     ),
                   ),

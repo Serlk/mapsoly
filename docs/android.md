@@ -41,7 +41,8 @@ files directory.
 | Online and offline map, traffic, route, 3D | `MapSurface.kt`: the Flutter texture MapLibre draws into, unpacking of glyphs/sprites; `libmapsoly_mln.so` (`native/maplibre/`) | `lib/map/engine/maplibre_engine.dart`, `maplibre/surface_android.dart`; `docs/map-engine.md`, "Android" |
 | Map without that library, packs | — (pure Dart) | `lib/map/engine/flutter_map_engine.dart`, `lib/packs/` |
 | SQLite (address search, cameras, positioning database) | prebuilt `libsqlite3.so` from the Maven artifact `eu.simonbinder:sqlite3-native-library` (`android/app/build.gradle.kts`) | `package:sqlite3` opens it by name |
-| Position | `LocationBridge.kt`: `LocationManager`, GPS provider, 1 Hz, plus `GnssStatus` satellites | `AndroidGnssSource` → `PositioningEngine` (`lib/positioning/platform_engine.dart`) |
+| Position from satellites | `LocationBridge.kt`: `LocationManager`, GPS provider, 1 Hz, plus `GnssStatus` satellites | `AndroidGnssSource` → `PositioningEngine` (`lib/positioning/platform_engine.dart`) |
+| Position without satellites | `RadioBridge.kt`: `WifiManager` scan results, `TelephonyManager` cells; `StillnessBridge.kt`: accelerometer | `AndroidWifiScanner`, `AndroidCellSource`, `StationaryFeeder` → the same engine |
 | Location permission | `Permissions.kt` | `LocationAccess`, shown in the "Местоположение" sheet |
 | Keep screen on | `FLAG_KEEP_SCREEN_ON` on `mapsoly/native_view` → `keepAwake` | `lib/map/keep_awake.dart` (unchanged) |
 | Compass | `CompassBridge.kt`: rotation vector → azimuth | `AndroidCompass`, chosen by `platformCompass()` |
@@ -59,29 +60,65 @@ unchanged and nothing under `linux/` knows about it.
 
 ### Position
 
-Only satellites are used. The fixes enter the same `PositioningEngine` as on
-Linux, as its GNSS source, so the fusion filter, the spoofing checks, speed,
-course and the privacy zones behave the same.
+Three sources feed the same `PositioningEngine` as on Linux, so the
+estimator, the fusion filter, the spoofing checks, the user's own
+transmitter database ("Собирать свою базу"), the online lookups ("Уточнять
+онлайн", off by default) and the privacy zones behave the same. Details of
+the sources are in `docs/positioning.md`, "Android".
 
-Wi-Fi and cell scanning is **not** implemented: Android throttles Wi-Fi scans
-to four per two minutes and both need more permissions. Without them the
-online lookups and the user's own transmitter database have nothing to work
-on, so their lines and switches are hidden in the location sheet on Android.
-The "network" location provider is not used either: on most phones it is a
-Google service.
+- **Satellites**: `LocationManager`, GPS provider. The "network" provider
+  is not used: on most phones it is a Google service.
+- **Wi-Fi**: the system's scan results (BSSID, level in dBm, frequency, the
+  age of each entry; the SSID only for the `_nomap` opt-out). Reading them
+  is free; a fresh scan is asked for at most every 31 s, because Android 9+
+  allows an app on screen four `startScan()` calls in two minutes. A
+  refusal (allowance used up, Wi-Fi scanning off) is not repeated for a
+  minute.
+- **Cells**: `TelephonyManager.requestCellInfoUpdate` (Android 10+, the
+  cached `getAllCellInfo` before that): GSM, UMTS, LTE and NR, serving and
+  neighbours. A device without a modem reports none.
 
-The permission is asked for once at the first start (system dialog). After a
-refusal the location sheet explains what is missing and offers "Разрешить",
-or "Открыть настройки" when the system no longer shows the dialog or
-location is switched off for the whole device; the state is read again when
-the app returns to the front. Location is read only while the app is on
-screen: there is no foreground service and no background permission, so
-guidance stops updating when the app is not visible.
+Permissions: `ACCESS_FINE_LOCATION` (already needed for satellites) guards
+all three; `ACCESS_WIFI_STATE` and `CHANGE_WIFI_STATE` are install-time.
+`NEARBY_WIFI_DEVICES` is deliberately not declared: it exists for apps that
+do not derive location from Wi-Fi, and scan results need the location
+permission regardless. Verified on Android 14 (emulator and a tablet): scan
+results and cells arrive with these permissions alone. Location must also
+be switched on in the system, or Android returns empty lists; the location
+sheet says so and offers the settings.
+
+Because scans are half a minute apart, two things differ from Linux
+(`androidPositioningConfig`): a scan entry counts for 45 s instead of 30,
+and while the accelerometer shows the device lying perfectly still the
+engine is told so once a second (`StationaryFeeder`), which keeps the
+accuracy circle from growing to kilometres between two scans. Stillness is
+ignored while satellites give a usable fix.
+
+Everything stops when the app leaves the screen (`AppLifecycleListener`,
+hidden → `engine.stop()`, shown → `engine.start()`): no location listener,
+no scan requests, no cell polls, no sensor. There is no foreground service
+and no background permission, so guidance does not update while another app
+is on top.
+
+The permission is asked for once per run of the app (system dialog). After
+a refusal the location sheet explains what is missing and offers
+"Разрешить", or "Открыть настройки" when the system no longer shows the
+dialog or location is switched off for the whole device; the state is read
+again when the app returns to the front.
+
+Fixes are dated by the platform's own record of when they were taken
+(`Location.elapsedRealtimeNanos`, turned into system-clock time), not by
+when the message reached Dart. While the app is busy several fixes can
+arrive together; dated by arrival they looked like one jump and tripped the
+spoofing check on a real device.
 
 The emulator's invented satellites (all with the same signal level, none
 used in the fix) look like a spoofing transmitter to `GnssSanityChecker`, so
 `LocationBridge` does not pass satellites on when it runs on emulator
 hardware (`ranchu`). Real devices are not affected.
+
+Bluetooth LE beacons are not used; what exists and what is missing is in
+`docs/positioning.md`, "BLE".
 
 ### Files
 
@@ -96,7 +133,9 @@ the proper answer and is not done.
 - The MapLibre engine on real hardware: it has only run on the emulator
   (x86_64); the arm64 library is built but untested, and performance on a
   phone is unmeasured.
-- Wi-Fi / cell positioning, wardriving, BLE (see above).
+- Bluetooth LE beacons for positioning (design note in
+  `docs/positioning.md`).
+- CDMA and TD-SCDMA cells (no model for them in the engine).
 - Background location and a foreground service for guidance with the screen
   off or another app on top.
 - Sharing files to other apps / picking files from anywhere.
@@ -127,6 +166,21 @@ fast enough to judge animations.
 `adb shell setprop debug.mapsoly.map_engine flutter` (until the emulator
 restarts; `""` clears it) starts the app with the Flutter map engine.
 
+The emulator has one invented access point and one invented LTE cell. To
+take the satellites away without switching location off (which would also
+empty the Wi-Fi and cell lists):
+
+```sh
+adb shell appops set com.android.shell android:mock_location allow
+adb shell cmd location providers add-test-provider gps
+adb shell cmd location providers set-test-provider-enabled gps false
+adb shell cmd location providers remove-test-provider gps   # back to normal
+```
+
+`adb logcat -s flutter` shows, in counts only, what the radios hear and
+what the satellites are thought of (`radio: wifi 9 seen 0 known ...`,
+`gnss health: suspect [radioMismatch]`, `online wifi lookup: ...`).
+
 Feed a fix every second and move it in small steps: a jump of hundreds of
 metres is, correctly, taken for spoofing and the satellites are ignored for
 a minute.
@@ -148,6 +202,36 @@ Checked there (release build, by screenshots and `adb logcat`):
 - export to and import from the exchange folder;
 - the system back key: closes search, a picked point, asks before ending
   guidance, leaves the app from the bare map.
+
+Radio positioning, checked there (2026-11-27):
+
+- the location sheet shows "Wi-Fi: видно 1" and "Соты: видно 1" (the
+  emulator's access point and cell), with no permission beyond location;
+- with "Собирать свою базу" on and fixes from `geo fix`, both become
+  "известно 1" within a scan or two and the source reads "спутники и
+  радио";
+- with the GPS provider replaced by a disabled test provider the position
+  stays: "Источник: Wi-Fi", 19–33 m while the accelerometer is still.
+  Without the stillness input the same setup swung between about 250 m and
+  2.7 km with every scan cycle;
+- a new scan list arrives every 33–35 s; right after a restart of the app
+  one request was refused (the allowance of the previous run) and the list
+  was 66 s old before the next one;
+- HOME removes the app's GPS registration (`dumpsys location`:
+  `-registration`), returning adds it again.
+
+On a real tablet (Android 14, arm64, with a modem), 2026-11-27, counts
+only: 9–11 access points and 3 cells seen. With "Уточнять онлайн" switched
+on, 2 of the 3 cells were resolved by beaconDB and the position came from
+them ("Источник: сотовые вышки", 170–185 m); none of the access points
+were known to Apple or beaconDB, which matches what `docs/positioning.md`
+records for the Linux phone at the same place, so a position from Wi-Fi was
+not observed on real hardware. The tablet's satellite receiver reported a
+steady 33 m/s while the device, by its accelerometer, lay still; once the
+cells were known the spoofing check called it (`radioMismatch`) and the
+satellites were ignored.
+Not exercised on hardware: learning the own database (it needs satellites
+the engine trusts) and phones on Android versions other than 14.
 
 The MapLibre engine, checked the same way (release build, `swangle_indirect`
 and `host`): the offline vector map of the pack with labels and icons, pan,
@@ -174,6 +258,10 @@ Dart side is covered by `test/obd/android_rfcomm_test.dart` against a fake
 channel; the Kotlin side has never exchanged a byte with a real adapter.
 
 Unit tests for the Dart halves: `test/positioning/android_gnss_test.dart`,
+`test/positioning/android_radio_test.dart`,
+`test/positioning/android_stillness_test.dart`,
+`test/positioning/platform_engine_test.dart`,
+`test/user/privacy_android_sources_test.dart`,
 `test/positioning/android_compass_test.dart`,
 `test/obd/android_rfcomm_test.dart`,
 `test/user/android_file_exchange_test.dart`.

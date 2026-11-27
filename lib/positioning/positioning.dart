@@ -19,6 +19,8 @@ export 'platform_engine.dart';
 export 'signal_model.dart';
 export 'sources/android_compass.dart';
 export 'sources/android_gnss.dart';
+export 'sources/android_radio.dart';
+export 'sources/android_stillness.dart';
 export 'sources/linux_cell.dart';
 export 'sources/linux_compass.dart';
 export 'sources/linux_wifi.dart';

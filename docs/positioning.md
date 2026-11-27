@@ -23,6 +23,10 @@ a live endpoint on 2026-11-26/27) or **[assumption]**.
 | `sources/linux_wifi.dart` | NetworkManager + wpa_supplicant |
 | `sources/linux_cell.dart` | ModemManager |
 | `sources/nmea_socket_gnss.dart` | NMEA over a unix socket |
+| `sources/android_gnss.dart` | Android: `LocationManager` fixes, the location permission |
+| `sources/android_radio.dart` | Android: Wi-Fi scan results, cells |
+| `sources/android_stillness.dart` | Android: "the device lies still" from the accelerometer |
+| `platform_engine.dart` | the engine with this platform's sources (Flutter; the rest is pure Dart) |
 | `location_db.dart` | SQLite transmitter database |
 | `importers.dart` | WiGLE CSV, generic / MLS CSV |
 | `wardriving.dart` | collector: GNSS + observations -> database |
@@ -174,9 +178,110 @@ silence.
 
 ### 2.4 BLE
 
-Model, database kind, wardriving and WiGLE import exist. There is no Linux
-scanner yet (`BleScanner` is an interface only) and BLE is not used by the
-estimator.
+**Exists:** the model (`BleObservation`, with a `randomAddress` flag), the
+database kind, the collector (`WardrivingCollector.addBle`: public
+addresses only, range from the level with BLE taken as 10 dB weaker than
+Wi-Fi, capped at 100 m), WiGLE/CSV import, the engine slot
+(`PositioningEngine.ble`, counted in `bleVisible`) and the privacy-zone
+checks for it.
+
+**Missing:** a scanner on either platform (`BleScanner` is an interface
+only), and any use of BLE in the estimator: `RadioEstimator` looks up Wi-Fi
+and cells only.
+
+**Why Android did not get one in the Wi-Fi/cell pass** (design note):
+
+* Only advertisers with a stable identity may enter the database; a
+  resolvable private address rotates every few minutes and would fill it
+  with ghosts. Android tells an app the address *type* only since API 35
+  (`BluetoothDevice.getAddressType()`); on Android 14 and older a scan
+  result is a bare address, and its top bits distinguish the kinds of
+  *random* address from each other, not random from public.
+* So below API 35 the honest filter is by payload, not by address: iBeacon
+  (Apple manufacturer data `02 15` + UUID/major/minor) and Eddystone-UID
+  (service data `0xFEAA`, frame `0x00`) carry fixed ids. They need a key
+  that is not a MAC (`ibeacon:<uuid>:<major>:<minor>`), while the collector
+  and the importers normalise BLE ids as MACs today.
+* It needs `BLUETOOTH_SCAN` at run time (Android 12+), declared *without*
+  `neverForLocation`, plus location on; a low-power scan in windows of a
+  few seconds, only while the app is on screen.
+* The estimator needs a BLE term: the Wi-Fi centroid with a shorter range
+  model and its own outlier radius (tens of metres, not 250 m).
+* Neither test device could have verified it: the emulator hears no
+  advertisers, and a home has few fixed beacons.
+
+A scanner that stores every address it hears would look like it works and
+slowly poison the database, so none was shipped.
+
+### 2.5 Android
+
+`platform_engine.dart` builds the engine with three sources that talk to
+the app's own platform channels (Kotlin side: `LocationBridge.kt`,
+`RadioBridge.kt`, `StillnessBridge.kt`). The platform side passes raw
+values; cleaning them up is Dart and unit-tested.
+
+**GNSS** (`AndroidGnssSource`): `LocationManager`, GPS provider, 1 Hz, with
+the satellites of `GnssStatus`. Accuracy is Android's own 68 % radius.
+`receivedAt` is when the fix was taken by the system's monotonic clock
+(`elapsedRealtimeNanos`), expressed in system-clock time: still not the
+receiver's time, and not the arrival time either, because fixes that queue
+up behind a busy app and arrive together would look like a jump.
+
+**Wi-Fi** (`AndroidWifiScanner`): `WifiManager.getScanResults()`, the
+system's cache of the latest scan by anyone, each entry with its age
+(`ScanResult.timestamp`).
+
+* Real dBm, frequency (2.4 / 5 / 6 GHz), SSID only for `_nomap`.
+* Dropped: the placeholder `02:00:00:00:00:00` (what an app without access
+  is shown), the all-zero address, levels >= 0, entries older than
+  `maxAge`; an access point listed twice counts once, at its strongest.
+* `startScan()` at most every 31 s (Android 9+: four per two minutes for an
+  app on screen), 60 s after a refusal. **[verified]** on the emulator: a
+  new list every 33–35 s.
+* `EstimatorConfig.maxWifiAge` is 45 s on Android (30 s elsewhere) and
+  `FusionConfig.radioFresh` 60 s (35 s), or the Wi-Fi estimate and its
+  label would drop out at the end of every scan cycle.
+
+**Cells** (`AndroidCellSource`): `requestCellInfoUpdate` (Android 10+) or
+the cached `getAllCellInfo`.
+
+| Field | GSM | UMTS | LTE | NR |
+|---|---|---|---|---|
+| area | LAC | LAC | TAC | TAC (24 bit) |
+| cell id | CID (16 bit) | UTRAN id (28 bit) | ECI (28 bit) | NCI (36 bit) |
+| physical id | BSIC | PSC | PCI | PCI |
+| signal | RSSI | RSCP | RSRP | SS-RSRP |
+| timing advance | bit periods | — | 16 Ts steps | — |
+
+* Android's "unavailable" (`Integer.MAX_VALUE`; `Long.MAX_VALUE` for the
+  NCI) becomes null, as do reserved values (LAC/TAC 0 and 0xFFFE/0xFFFF,
+  CID 0xFFFF, ECI 0xFFFFFFF, MCC 0). A neighbour known only by its physical
+  id therefore has no database key and is counted as seen, never stored or
+  looked up.
+* CDMA and TD-SCDMA are skipped (no model). A cell reported once per SIM is
+  kept once.
+* No modem, no SIM registered, no permission: an empty list, no error.
+
+**Stillness** (`StationaryFeeder`): scans half a minute apart leave the
+filter without evidence of movement in between, and with its car-grade
+process noise the accuracy circle of a tablet on a desk swung from tens of
+metres to kilometres with every scan (**[verified]** on the emulator:
+250 m – 2.7 km). While the standard deviation of the accelerometer's
+magnitude over ~3 s stays below 0.04 m/s² (0.07 to leave the state) the
+engine gets `addStationarySample()` once a second: a zero-velocity update
+that does not count as a speed source. Not fed while a usable GNSS fix is
+less than 3 s old. **[assumption]**: the thresholds separate a resting
+device from a car; they were only tried on an emulator (constant readings)
+and a tablet on a desk.
+
+**Lifecycle**: when the app is hidden the engine is stopped (location
+listener removed, no scan requests, no cell polls, accelerometer released)
+and started again when it is shown.
+
+**Permissions**: `ACCESS_FINE_LOCATION` at run time; `ACCESS_WIFI_STATE`,
+`CHANGE_WIFI_STATE` at install. Not `NEARBY_WIFI_DEVICES`: scan results
+need the location permission whatever else is held, and that permission is
+meant for apps that do not locate by Wi-Fi.
 
 ## 3. Location database
 
@@ -417,6 +522,8 @@ plane (re-centred beyond 30 km).
 * External speed (OBD): magnitude-only EKF update `h(x) = |v|`
   (`σ = 0.7 m/s`), heading from the state (or the last known course); zero
   speed -> zero-velocity update.
+* Stillness (`addStationary`, Android): a zero-velocity update
+  (`σ = 0.2 m/s`) that is not a speed source for the label below.
 * Radio fixes pass a 5σ Mahalanobis gate; after 3 consecutive rejections the
   filter restarts at the new position. A healthy GNSS fix that fails the gate
   restarts it immediately.

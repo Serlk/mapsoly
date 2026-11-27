@@ -336,7 +336,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   /// Where reading the position takes the user's consent: its state, and
   /// the way to ask.
   LocationAccess? _locationAccess;
-  bool _radioPositioning = true;
+  PlatformPositioning? _platformPositioning;
   ObdService? _obd;
   Timer? _simulation;
   bool _demoStarted = false;
@@ -465,6 +465,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     _compassSub?.cancel();
     _compass?.stop();
     _obd?.dispose();
+    _platformPositioning?.release();
     widget.user.guard.detach();
     final positioning = _positioning;
     if (positioning != null) {
@@ -948,7 +949,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
         );
         engine = platform?.engine;
         _locationAccess = platform?.access;
-        _radioPositioning = platform?.radio ?? true;
+        _platformPositioning = platform;
       }
       if (engine != null) {
         // Before anything is collected or sent: the privacy zones.
@@ -1076,7 +1077,6 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
         positioning: _positioning,
         settings: widget.settings,
         access: _locationAccess,
-        radio: _radioPositioning,
       ),
     );
   }
@@ -1738,7 +1738,6 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
                               onOpenPacks: _showPacks,
                               showSensors: hooks == null && Platform.isLinux,
                               locationAccess: _locationAccess,
-                              radioPositioning: _radioPositioning,
                               user: widget.user,
                               services: this,
                               files: _files,

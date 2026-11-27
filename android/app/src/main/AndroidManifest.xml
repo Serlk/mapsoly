@@ -8,6 +8,15 @@
          location). -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!-- Position without satellites: the Wi-Fi access points in range
+         (reading the system's scan results and asking for a scan) and the
+         cell towers. Both are guarded by the location permission above,
+         which is the honest one for it: the scans are used to derive the
+         position. That is also why NEARBY_WIFI_DEVICES (Android 13+) is not
+         declared: it is for apps that do NOT locate by Wi-Fi, and scan
+         results need the location permission either way. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
     <!-- ELM327 adapters over Bluetooth Classic: paired devices only, so no
          scan permission. BLUETOOTH is the pre-Android 12 name. -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
@@ -15,6 +24,8 @@
     <!-- None of these is required to install: the app is a map first. -->
     <uses-feature android:name="android.hardware.location.gps" android:required="false"/>
     <uses-feature android:name="android.hardware.bluetooth" android:required="false"/>
+    <uses-feature android:name="android.hardware.wifi" android:required="false"/>
+    <uses-feature android:name="android.hardware.telephony" android:required="false"/>
     <uses-feature android:name="android.hardware.sensor.compass" android:required="false"/>
     <application
         android:label="Mapsoly"

@@ -40,13 +40,7 @@ class LocationSheet extends StatelessWidget {
     required this.settings,
     this.showTitle = true,
     this.access,
-    this.radio = true,
   });
-
-  /// False where Wi-Fi and cell scans are not read (Android): there is
-  /// nothing to look up or to collect, so those lines and switches would
-  /// only confuse.
-  final bool radio;
 
   /// Where the system asks the user before giving out the position: what
   /// was answered. Null when there is nothing to ask.
@@ -75,12 +69,8 @@ class LocationSheet extends StatelessWidget {
                 ? 'Местоположение пока не определено'
                 : 'Источник: ${_sourceNames[fix.source]}, '
                       'точность около ${fix.accuracyM.round()} м',
-            if (radio) ...[
-              'Wi-Fi: видно ${status.wifiVisible}, '
-                  'известно ${status.wifiKnown}',
-              'Соты: видно ${status.cellsVisible}, '
-                  'известно ${status.cellsKnown}',
-            ],
+            'Wi-Fi: видно ${status.wifiVisible}, известно ${status.wifiKnown}',
+            'Соты: видно ${status.cellsVisible}, известно ${status.cellsKnown}',
             status.gnssConnected
                 ? 'Спутники: в решении ${status.satellitesUsed} '
                       'из ${status.satellitesInView}'
@@ -135,26 +125,24 @@ class LocationSheet extends StatelessWidget {
                   ),
                 ),
               const SizedBox(height: 8),
-              if (radio) ...[
-                SwitchListTile(
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-                  title: const Text('Уточнять онлайн'),
-                  subtitle: const Text(
-                    'Неизвестные Wi-Fi и соты отправляются в beaconDB и Apple',
-                  ),
-                  value: settings.onlineLocation,
-                  onChanged: (v) => settings.onlineLocation = v,
+              SwitchListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                title: const Text('Уточнять онлайн'),
+                subtitle: const Text(
+                  'Неизвестные Wi-Fi и соты отправляются в beaconDB и Apple',
                 ),
-                SwitchListTile(
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-                  title: const Text('Собирать свою базу'),
-                  subtitle: const Text(
-                    'Запоминать Wi-Fi и соты, пока спутники дают точную позицию',
-                  ),
-                  value: settings.wardriving,
-                  onChanged: (v) => settings.wardriving = v,
+                value: settings.onlineLocation,
+                onChanged: (v) => settings.onlineLocation = v,
+              ),
+              SwitchListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                title: const Text('Собирать свою базу'),
+                subtitle: const Text(
+                  'Запоминать Wi-Fi и соты, пока спутники дают точную позицию',
                 ),
-              ],
+                value: settings.wardriving,
+                onChanged: (v) => settings.wardriving = v,
+              ),
             ],
           ),
         );

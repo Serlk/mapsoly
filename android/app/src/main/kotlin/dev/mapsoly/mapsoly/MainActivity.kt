@@ -13,14 +13,16 @@ import io.flutter.plugin.common.MethodChannel
 
 /**
  * The Android side of the app's own platform channels. Everything here uses
- * plain framework APIs (LocationManager, SensorManager, BluetoothSocket,
- * AudioTrack): no Google Play services and nothing that needs a key.
+ * plain framework APIs (LocationManager, WifiManager, TelephonyManager,
+ * SensorManager, BluetoothSocket, AudioTrack): no Google Play services and nothing that needs a key.
  *
  * Channels:
  *  - `mapsoly/native_view`: the name the Linux runner already answers on;
  *    only `keepAwake` exists here.
- *  - `mapsoly/android`: permissions, folders, the alert sound, Bluetooth.
- *  - `mapsoly/android/location`, `/compass`, `/bluetooth`: event streams.
+ *  - `mapsoly/android`: permissions, folders, the alert sound, Bluetooth,
+ *    Wi-Fi scans and cell measurements (RadioBridge.kt).
+ *  - `mapsoly/android/location`, `/compass`, `/still`, `/bluetooth`: event
+ *    streams.
  *  - `mapsoly/map_surface`: the texture the MapLibre map engine draws into
  *    (MapSurface.kt).
  */
@@ -28,6 +30,7 @@ class MainActivity : FlutterActivity() {
     private lateinit var permissions: Permissions
     private var location: LocationBridge? = null
     private var compass: CompassBridge? = null
+    private var stillness: StillnessBridge? = null
     private var bluetooth: BluetoothBridge? = null
     private var mapSurface: MapSurface? = null
     private val sound = AlertPlayer()
@@ -47,7 +50,9 @@ class MainActivity : FlutterActivity() {
         permissions = Permissions(this)
         location = LocationBridge(this, messenger)
         compass = CompassBridge(this, messenger)
+        stillness = StillnessBridge(this, messenger)
         val bt = BluetoothBridge(this, messenger).also { bluetooth = it }
+        val radio = RadioBridge(this)
         mapSurface = MapSurface(applicationContext, flutterEngine.renderer, messenger)
 
         MethodChannel(messenger, "mapsoly/native_view").setMethodCallHandler { call, result ->
@@ -81,7 +86,10 @@ class MainActivity : FlutterActivity() {
                     )
                     result.success(null)
                 }
-                "locationEnabled" -> result.success(location?.providerEnabled() ?: false)
+                "locationEnabled" -> result.success(location?.locationEnabled() ?: false)
+                "wifiScan" -> result.success(radio.wifiScan())
+                "wifiRequestScan" -> result.success(radio.wifiRequestScan())
+                "cells" -> radio.cells(result)
                 "hasCompass" -> result.success(compass?.available() ?: false)
                 "playPcm" -> {
                     val pcm = call.argument<ByteArray>("pcm")
@@ -116,6 +124,7 @@ class MainActivity : FlutterActivity() {
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         location?.stop()
         compass?.stop()
+        stillness?.stop()
         bluetooth?.closeAll()
         mapSurface?.release()
         mapSurface = null
