@@ -189,7 +189,10 @@ void main() {
     // An adapter that answers the speed request with 60 km/h.
     bridge.onWrite = (id, data) {
       final command = String.fromCharCodes(data).trim();
-      bridge.receive(id, command.startsWith('010D') ? '41 0D 3C\r\r>' : 'OK\r\r>');
+      bridge.receive(
+        id,
+        command.startsWith('010D') ? '41 0D 3C\r\r>' : 'OK\r\r>',
+      );
     };
     final link = await bridge.bluetooth().connect('00:1D:A5:68:98:8B');
     final elm = Elm327(link);

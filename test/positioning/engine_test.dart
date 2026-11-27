@@ -111,6 +111,8 @@ void main() {
         wifiScanInterval: Duration(hours: 1),
         cellPollInterval: Duration(hours: 1),
         outputInterval: Duration(hours: 1),
+        // Not about the wait before a new track may teach the database.
+        sanity: GnssSanityConfig(settleAfter: Duration.zero),
       ),
     );
     // Four known APs around the origin and the serving cell 400 m away.
@@ -248,7 +250,8 @@ void main() {
       expect(engine.current!.source, PositionSource.wifi);
 
       // The receiver "sees" a perfectly stable fix 6 km away.
-      for (var t = 0; t < 6; t++) {
+      // The contradiction has to last ten seconds.
+      for (var t = 0; t < 13; t++) {
         tick();
         gnss.controller.add(fix(6000, 0));
       }

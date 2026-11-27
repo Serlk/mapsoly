@@ -8,6 +8,7 @@ export 'fusion.dart';
 export 'geo.dart';
 export 'gnss_sanity.dart';
 export 'importers.dart';
+export 'journal.dart';
 export 'location_access.dart';
 export 'location_db.dart';
 export 'models.dart';

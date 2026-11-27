@@ -78,6 +78,8 @@ class StationaryFeeder {
     if (!engine.isRunning) return;
     final fix = engine.lastGnssFix;
     final now = _now();
+    // Evidence for the spoofing check, whatever the satellites say.
+    engine.noteDeviceStill(time: now);
     if (fix != null &&
         fix.hasPosition &&
         engine.status.gnssHealth.usable &&

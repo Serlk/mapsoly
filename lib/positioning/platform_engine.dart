@@ -7,6 +7,7 @@ import 'dart:io';
 import 'package:flutter/widgets.dart';
 
 import 'engine.dart';
+import 'journal.dart';
 import 'estimator.dart';
 import 'fusion.dart';
 import 'location_access.dart';
@@ -86,7 +87,7 @@ PlatformPositioning? createPlatformPositioning({
       PositioningEngine.linux(
         dbPath: dbPath,
         config: config ?? const PositioningConfig(),
-      ),
+      )..journal = PositionJournal.requested(dbPath),
     );
   }
   if (Platform.isAndroid) {
@@ -99,7 +100,7 @@ PlatformPositioning? createPlatformPositioning({
       gnss: gnss,
       resolver: OnlineResolver(db),
       config: config ?? androidPositioningConfig,
-    );
+    )..journal = PositionJournal.requested(dbPath);
     return PlatformPositioning(
       engine,
       access: gnss,

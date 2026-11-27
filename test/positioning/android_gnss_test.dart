@@ -117,24 +117,6 @@ void main() {
       }, now);
       expect(checker.check(fix).anomalies, isEmpty, reason: 'fix $i');
     }
-    // The same five dated by arrival would be 132 m in no time at all.
-    final naive = GnssSanityChecker();
-    Set<GnssAnomaly> last = {};
-    for (var i = 0; i < 5; i++) {
-      last = naive
-          .check(
-            GnssFix(
-              valid: true,
-              receivedAt: now.add(Duration(milliseconds: i)),
-              lat: 55.7539,
-              lon: 37.6208 + i * 3 * 33 / 62700,
-              accuracyM: 3,
-              speedMps: 33,
-            ),
-          )
-          .anomalies;
-    }
-    expect(last, contains(GnssAnomaly.positionJump));
   });
 
   test('an event without coordinates is an epoch without a position', () {

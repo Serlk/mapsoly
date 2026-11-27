@@ -486,27 +486,95 @@ Wi-Fi is used when available; if it lies further than
 ## 7. GNSS sanity check
 
 `GnssSanityChecker.check(fix, radio:)` per epoch. A fix is used for fusion
-and wardriving only when `health.usable`.
+only when the verdict is `ok` and it is not `unconfirmed`; it teaches the
+database only when it is also `settled`.
 
-| Anomaly | Rule | Constants |
+### 7.1 What the field showed (2026-11-27)
+
+A tablet lying on a table received, for as long as it was watched, a closed
+loop about a kilometre across driven at exactly 33.0 m/s, more than 5 km from
+where it was. Reported speed and position agreed with each other, accuracy
+was 2 m, 20-34 satellites at 36-42 dB-Hz. The only physical flaws were the
+corners: 155 degrees in two seconds at full speed (45 m/s^2 sideways), every
+20-35 s. `test/positioning/gnss_sanity_test.dart` keeps 74 s of it
+(`spoofedLoop`, offsets from its first fix only).
+
+The first version of the check ("any anomaly takes the satellites away for
+60 s"; radio mismatch after two epochs against any estimate) lost genuine
+GNSS on the road again and again: the transmitter database is patchy and
+sometimes wrong, an open cell database claims 170 m for a tower heard 3 km
+away, a scan describes where the car was half a minute ago.
+
+### 7.2 Tracks
+
+The checker follows the receiver's track and remembers the last fix it
+trusted (the anchor).
+
+* **Break.** Two consecutive fixes further apart than
+  `1.5 * v * dt + 3 * (acc1 + acc2) + 30 m` at an implied speed above 15 m/s,
+  or more than 10 s of silence, start a new track. `dt` is taken from the
+  receiver's own clock when it is larger than the arrival interval (epochs
+  bunch up when the app is busy).
+* **Reach.** A new track is believed at once when the device could have got
+  there from the anchor: accelerating at 4 m/s^2 up to 60 m/s, plus
+  accuracies and 100 m. This is the far end of a tunnel, and the way back
+  when a spoofer stops. While something is already suspected the bound is
+  tighter (the larger of 1.5 x the anchor's speed and that speed + 15 m/s),
+  so that the next false point does not pass merely because time went by;
+  a device whose motion sensors have shown it still since the anchor has not
+  moved at all.
+* **Teleport.** A new track out of reach is a candidate: withheld quietly for
+  4 s (a multipath glitch is back by then, and costs one epoch and no
+  alarm), then reported as `positionJump`. A GNSS time step against the
+  anchor's clock offset at the same moment adds `timeJump`; a time step
+  without a break is the system clock being set and means nothing.
+* **A candidate becomes trusted** when a Wi-Fi-grade radio estimate agrees
+  with it, or when it has shown nothing else wrong for as long as the track
+  it replaced had lasted (30 s to 5 min): the app was started under a
+  spoofer and the first track was the lie.
+
+### 7.3 Signatures
+
+Each is held for a while after it was last seen; any of them makes the
+verdict `suspect`. Those tied to a track's motion are dropped when a new,
+reachable track begins.
+
+| Anomaly | Condition | Held |
 |---|---|---|
-| `radioMismatch` | distance(GNSS, radio fix) > `3 · (acc_gnss + acc_radio) + 100 m` for 2 consecutive epochs; radio fix at most 45 s old | a single mismatching epoch is already withheld (`unconfirmed`) |
-| `uniformCn0` | >= 6 satellites with C/N0 and standard deviation < 1.5 dB-Hz for 3 epochs | real skies spread 4-10 dB-Hz with elevation and obstruction; one spoofing transmitter gives every PRN the same level |
-| `positionJump` | step > `1.5 · v · dt + 3 · (acc1 + acc2) + 30 m` and implied speed > 15 m/s | `v` = larger reported speed |
-| `timeJump` | (GNSS UTC - system clock) changes by > 5 s between epochs | a constant offset is tolerated |
-| `weakSignal` | >= 4 satellites all below 22 dB-Hz, or fix lost with no usable signal | reported as `jammingSuspected`; cannot be told from being indoors |
+| `impossibleMotion` | between consecutive epochs (<= 3 s apart): sideways acceleration `v * turn / dt` above 15 m/s^2 with both speeds >= 8 m/s, or speed changing faster than 12 m/s^2 | 45 s |
+| `motionMismatch` | reported speed >= 5 m/s while the device has lain still for 8 s (Android accelerometer); or differing from the vehicle's own speed (OBD) by more than max(8 m/s, 40 %) for 5 epochs | 20 s |
+| `radioMismatch` | distance to the radio estimate above the limit for 10 s without one agreement. The fix compared is the one nearest in time to the scan. Wi-Fi-grade estimate (not cells, more than one transmitter, accuracy <= 150 m): `3 * (accGnss + accRadio) + 300 m + v * (lag + 10 s)`. Coarse: `max(5 * accRadio, 5 km) + v * (lag + 10 s)` | 60 s, cleared by the first agreement |
+| `uniformCn0` | >= 6 satellites with C/N0 and standard deviation < 1.5 dB-Hz for 3 epochs | 20 s |
+| `weakSignal` | strongest satellite < 22 dB-Hz, or the fix lost abruptly with dead signals | jamming hint only, never `suspect` |
 
-Anomalies other than `weakSignal` make the verdict `suspect` and are held for
-60 s after they were last seen. A radio fix that agrees with GNSS clears
-`radioMismatch`; if it is Wi-Fi grade (<= 150 m) it also clears a held jump.
-When the verdict turns `suspect` the engine restarts the filter from the
-radio estimate alone and clears the wardriving buffer.
+A fresh track (< 45 s) that the radio estimate disagrees with is
+`unconfirmed` while the 10 s run; an established one keeps feeding the
+filter until the mismatch is confirmed.
 
-Limits **[assumption-laden, untested on real attacks]**: the thresholds come
-from typical values, not from recorded spoofing. A slow drag-off without
-radio coverage and with realistic per-satellite levels is not detected. With
-a cell-only radio fix (accuracy ~1 km) only displacements of several km are
-caught.
+### 7.4 What the engine does with it
+
+* `usable`: fed to the filter. `settled` (trusted for 45 s, or confirmed by
+  Wi-Fi): also to the wardriving collector. The loop above was recognised
+  25 s in by its first corner; nothing was learnt from it.
+* `suspect`: nothing is fed, the filter carries on from what it has. Only
+  when fixes of the same track had already been used (`contaminated`: the
+  track is younger than 5 min, or the radio contradicts it) is the filter
+  restarted, from the radio estimate or from the anchor before that track
+  with a radius grown by the time gone by.
+
+Limits. A spoofer that puts the receiver within reach of the anchor and
+moves it like a car is told only by the radio estimate, the motion sensors
+or OBD; with none of them it is followed. On Linux there is no stillness
+input yet. Thresholds for `uniformCn0` are still from typical values.
+
+### 7.5 Journal
+
+`PositionJournal` writes one CSV line per epoch (fix, verdict, anomalies,
+radio estimate, output) to a file on the device: `MAPSOLY_POS_LOG=<file>`,
+or a file `positioning-journal.on` next to the database (journal:
+`positioning-journal.csv` beside it, 20 MB, one previous file kept). Off by
+default because it is a track; lines written in a privacy zone carry no
+coordinates.
 
 ## 8. Fusion filter
 

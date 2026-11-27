@@ -9,6 +9,7 @@ import 'estimator.dart';
 import 'fusion.dart';
 import 'gnss_sanity.dart';
 import 'importers.dart';
+import 'journal.dart';
 import 'location_db.dart';
 import 'models.dart';
 import 'online/resolver.dart';
@@ -220,6 +221,10 @@ class PositioningEngine {
   DateTime? _lastFedAt;
   PositioningStatus _status = const PositioningStatus();
 
+  /// Diagnostics journal of every GNSS epoch and its verdict; null = none.
+  /// See [PositionJournal] for when one is kept.
+  PositionJournal? journal;
+
   /// Last error raised while polling a source (diagnostics), or null.
   String? lastSourceError;
 
@@ -355,6 +360,7 @@ class PositioningEngine {
     await cells?.close();
     await ble?.close();
     _resolver?.close();
+    await journal?.close();
     await _estimates.close();
     await _statuses.close();
     db.close();
@@ -362,7 +368,18 @@ class PositioningEngine {
 
   /// External speed-over-ground input in m/s (OBD, wheel sensor).
   void addSpeedSample(double speedMps, {DateTime? time}) {
-    _filter.addSpeed(speedMps, time ?? _now());
+    final t = time ?? _now();
+    _filter.addSpeed(speedMps, t);
+    // The car's own speed is also a witness against a lying receiver.
+    _sanity.noteSpeed(speedMps, t);
+  }
+
+  /// The device's motion sensors show it lying still right now. Unlike
+  /// [addStationarySample] this does not touch the position: it is evidence
+  /// for the spoofing check (a receiver reporting motorway speed from a
+  /// table is lying). Call about once a second while it holds.
+  void noteDeviceStill({DateTime? time}) {
+    _sanity.noteStill(time ?? _now());
   }
 
   /// The device is lying still right now (motion sensors): the position
@@ -506,7 +523,7 @@ class PositioningEngine {
       }
     }
 
-    if (_wardriving && _sanity.health.usable) {
+    if (_wardriving && _sanity.health.settled) {
       if (wifiChanged) {
         _collector.addWifi(_lastWifi, now);
         if (_lastBle.isNotEmpty) _collector.addBle(_lastBle, now);
@@ -560,21 +577,30 @@ class PositioningEngine {
   void _onGnss(GnssFix fix) {
     _lastFix = fix;
     final radio = _radio.best;
-    final wasSuspect = _sanity.health.spoofingSuspected;
     final health = _sanity.check(fix, radio: radio);
+    journal?.gnss(
+      fix,
+      health,
+      radio: radio,
+      output: _current,
+      private: inPrivateArea,
+    );
     if (health.usable) {
       _filter.addGnss(fix);
-      if (_wardriving) _collector.addFix(fix);
+      if (_wardriving && health.settled) _collector.addFix(fix);
     } else if (health.spoofingSuspected) {
       // Do not let a lying receiver teach the database.
       _collector.reset();
-      if (!wasSuspect) {
-        // The filter may already have followed the receiver for a while
-        // (slow drag-off): restart it from the radio estimate alone.
+      if (health.contaminated) {
+        // The filter has followed the receiver for a while: restart it
+        // from the radio estimate, or from where the receiver was last
+        // believed. A track that was never used leaves the filter alone:
+        // it simply carries on without the satellites.
         _filter.reset();
         _lastFedKey = null;
-        if (radio != null) {
-          _filter.addPosition(radio);
+        final seed = radio ?? health.fallback;
+        if (seed != null) {
+          _filter.addPosition(seed);
           _lastFedAt = _now();
         }
       }

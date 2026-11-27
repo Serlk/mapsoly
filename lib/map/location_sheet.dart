@@ -81,7 +81,8 @@ class LocationSheet extends StatelessWidget {
                 : 'Нет связи со спутниковым приёмником: системная служба '
                       'GNSS не запущена или недоступна',
             if (status.spoofingSuspected)
-              'Похоже на подмену GPS — спутники не используются',
+              'Похоже на подмену GPS — спутники не используются'
+                  '${spoofingReason(status.gnssHealth.anomalies)}',
             if (status.jammingSuspected) 'Похоже на глушение GPS',
             if (status.onlineError != null) 'Онлайн-уточнение не отвечает',
             if (status.privateArea)
@@ -149,4 +150,20 @@ class LocationSheet extends StatelessWidget {
       },
     );
   }
+}
+
+/// Why the satellites are not believed, in a few words for the sheet: the
+/// most telling reason only.
+String spoofingReason(Set<GnssAnomaly> anomalies) {
+  const reasons = {
+    GnssAnomaly.motionMismatch: 'приёмник показывает движение, которого нет',
+    GnssAnomaly.impossibleMotion: 'манёвры, невозможные для машины',
+    GnssAnomaly.positionJump: 'позиция перескочила в другое место',
+    GnssAnomaly.radioMismatch: 'не сходится с Wi-Fi и сотами',
+    GnssAnomaly.uniformCn0: 'все спутники слышны одинаково',
+  };
+  for (final e in reasons.entries) {
+    if (anomalies.contains(e.key)) return ': ${e.value}';
+  }
+  return '';
 }

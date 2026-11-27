@@ -72,6 +72,8 @@ void main() {
         wifiScanInterval: const Duration(hours: 1),
         cellPollInterval: const Duration(hours: 1),
         outputInterval: const Duration(hours: 1),
+        // Not about the wait before a new track may teach the database.
+        sanity: const GnssSanityConfig(settleAfter: Duration.zero),
         onlineLookups: online,
         wardriving: true,
         wardrivingConfig: WardrivingConfig(keepRawSamples: rawSamples),
