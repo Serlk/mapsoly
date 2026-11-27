@@ -972,6 +972,7 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
                 });
             }
         }
+#ifndef __ANDROID__ // there the cap is a number of vsyncs per frame, see Backend::divisor
         if (minFrameUs > 0 && visible && dirty && !bench.active()) {
             // Capped: too early for the next frame. Come back when it is due instead of
             // drawing every frame the compositor would take.
@@ -988,6 +989,7 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
                 return;
             }
         }
+#endif
         if (visible && dirty && updateParameters && backend->canRender() && !failed) {
             // MapLibre throws from deep inside a frame now and then (seen: "out of range
             // destination coordinates for image copy" from its pattern atlas). One bad
@@ -1009,6 +1011,9 @@ struct mlnb_map final : public mln::RendererFrontend, public mln::MapObserver {
     void render() {
         const int64_t start = monoUs();
         lastRenderUs = start;
+#ifdef __ANDROID__
+        backend->frameStartUs = start;
+#endif
         mln::gfx::BackendScope guard{*backend, mln::gfx::BackendScope::ScopeType::Implicit};
         dirty = false;
         auto params = updateParameters;
@@ -1561,6 +1566,9 @@ void mlnb_set_max_fps(mlnb_map* m, int32_t fps) {
     MLNB_CALL();
     m->post([=] {
         m->minFrameUs = fps > 0 ? 1000000 / fps : 0;
+#ifdef __ANDROID__
+        m->backend->setMaxFps(fps);
+#endif
         if (m->asyncTick) m->asyncTick->send();
     });
 }

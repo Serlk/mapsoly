@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:async';
 import 'dart:ffi' hide Size;
 
@@ -6,6 +7,35 @@ import 'package:flutter/widgets.dart';
 
 import 'bridge.dart';
 import 'surface.dart';
+
+/// The pixel ratio the map of a [view] (logical pixels) is drawn at on a
+/// screen of [devicePixelRatio].
+///
+/// A map is all fill: every pixel is painted several times over (ground,
+/// roads, buildings, traffic, labels) and then once more when Flutter puts
+/// the picture into its scene. A 2560x1600 tablet asks for four million
+/// pixels of that from a GPU half as fast as a phone's that draws two. So
+/// the map gets a budget of [budget] pixels: above it the picture is drawn
+/// smaller and scaled up by Flutter. Lines and labels keep their size on
+/// the screen (MapLibre lays the map out in logical pixels; the ratio only
+/// says how finely), they are just a little softer.
+///
+/// Never below 1.25: under that MapLibre takes the coarse sprites and
+/// tiles. In steps of a quarter, so that a view resized by a few pixels
+/// does not change it (a new ratio means a new native map).
+double mapPixelRatio(
+  double devicePixelRatio,
+  Size view, {
+  double budget = 2.2e6,
+}) {
+  final logical = view.width * view.height;
+  if (logical <= 0 || logical * devicePixelRatio * devicePixelRatio <= budget) {
+    return devicePixelRatio;
+  }
+  final fit = math.sqrt(budget / logical);
+  final stepped = (fit * 4).floor() / 4;
+  return stepped.clamp(math.min(1.25, devicePixelRatio), devicePixelRatio);
+}
 
 /// The size in device pixels of a texture that covers [logical] exactly at
 /// [devicePixelRatio] (at least 1x1).
@@ -153,10 +183,17 @@ class AndroidMapSurface implements MapSurface {
     }
   }
 
-  /// Android densities are not integers (2.75 is common); the map is drawn
-  /// at exactly the view's pixels.
+  /// Draw the map at every pixel of the screen, whatever that costs. Off
+  /// (the default) the map of a large dense screen is drawn at fewer pixels
+  /// and scaled up, see [mapPixelRatio].
+  static bool fullResolution = false;
+
+  /// Android densities are not integers (2.75 is common).
   @override
-  double ratioFor(double devicePixelRatio) => devicePixelRatio;
+  double ratioFor(double devicePixelRatio, [Size? view]) =>
+      view == null || fullResolution
+      ? devicePixelRatio
+      : mapPixelRatio(devicePixelRatio, view);
 
   @override
   Pointer<Void>? create(

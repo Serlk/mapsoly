@@ -471,7 +471,10 @@ class _MapLibreViewState extends State<MapLibreView>
             box.size.width.roundToDouble(),
             box.size.height.roundToDouble(),
           );
-    final ratio = _surface.ratioFor(View.of(context).devicePixelRatio);
+    final ratio = _surface.ratioFor(
+      View.of(context).devicePixelRatio,
+      rect.size,
+    );
     final map = _map;
     if (map != null && ratio != _ratio) {
       // The pixel ratio is fixed in a MapLibre renderer: start a new one.

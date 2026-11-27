@@ -27,6 +27,7 @@ import '../user/user_data.dart';
 import '../user/user_places.dart';
 import 'alert_sound.dart';
 import 'drive_camera.dart';
+import 'engine/maplibre/surface_android.dart' show AndroidMapSurface;
 import 'engine/engines.dart';
 import 'engine/map_engine.dart';
 import 'guidance.dart';
@@ -384,6 +385,8 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     _map.cameraChanges.addListener(_onCameraMoved);
     _startPositioning();
     widget.settings.addListener(_applyLocationSettings);
+    AndroidMapSurface.fullResolution = widget.settings.fullResolutionMap;
+    widget.settings.addListener(_applyMapResolution);
     widget.settings.addListener(_applySensorSettings);
     _heat.addListener(_rebuild);
     widget.settings.addListener(_applyHeatSetting);
@@ -492,6 +495,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     _downloads?.dispose();
     _pick?.completer.complete(null);
     widget.settings.removeListener(_applyLocationSettings);
+    widget.settings.removeListener(_applyMapResolution);
     widget.settings.removeListener(_applySensorSettings);
     widget.settings.removeListener(_applyHeatSetting);
     _heat.dispose();
@@ -938,6 +942,9 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
 
   final _steadyAccuracy = SteadyAccuracy();
 
+  /// What the glass panels of this screen blur, shared between them.
+  final _backdrop = BackdropKey();
+
   /// The radius of the accuracy circle, or null for none. The circle is
   /// there to say "somewhere around here" when the position comes from
   /// Wi-Fi or cells; with a proper satellite fix it only gets in the way.
@@ -1078,6 +1085,15 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     setState(() => _obd = service);
     _epoch.value++;
     unawaited(service.apply(widget.settings.obd));
+  }
+
+  void _applyMapResolution() {
+    if (AndroidMapSurface.fullResolution == widget.settings.fullResolutionMap) {
+      return;
+    }
+    AndroidMapSurface.fullResolution = widget.settings.fullResolutionMap;
+    // The map view picks its ratio when it is laid out.
+    _rebuild();
   }
 
   void _applyLocationSettings() {
@@ -1686,193 +1702,198 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
       },
       child: GlassScope(
         registry: _glass,
-        child: ListenableBuilder(
-          // Rebuilt with the route, so "back" always knows what is open.
-          listenable: _route,
-          // The system or hardware back key lands here while there is
-          // something to close; with nothing left it leaves the app.
-          builder: (context, child) => PopScope(
-            canPop: !_canGoBack,
-            onPopInvokedWithResult: (didPop, _) {
-              if (!didPop) _goBack();
-            },
-            child: child!,
-          ),
-          child: Focus(
-            autofocus: true,
-            child: Scaffold(
-              // The map continues under the translucent bottom bar.
-              extendBody: true,
-              body: ListenableBuilder(
-                listenable: Listenable.merge([
-                  _traffic,
-                  _route,
-                  _positioning,
-                  _downloads,
-                  widget.user.places,
-                  widget.user.searches,
-                ]),
-                builder: (context, _) => LayoutBuilder(
-                  builder: (context, box) {
-                    if (box.biggest != _viewSize) {
-                      _viewSize = box.biggest;
-                      _applyDrivePadding();
-                      // Not now: its result rebuilds this widget.
-                      WidgetsBinding.instance.addPostFrameCallback((_) {
-                        if (mounted) _heatView();
-                      });
-                    }
-                    final scene = _scene(context);
-                    // Any touch brings back the controls hidden on the move.
-                    return Listener(
-                      behavior: HitTestBehavior.translucent,
-                      onPointerDown: (_) => _revealChrome(),
-                      child: Stack(
-                        children: [
-                          // While another section covers the screen the map is
-                          // not drawn, so typing does not compete with it.
-                          Listener(
-                            key: _mapKey,
-                            // A tap only brings the controls back; the camera
-                            // stops following once the finger drags the map.
-                            onPointerDown: (e) => _pointerDownAt = e.position,
-                            onPointerMove: (e) {
-                              final down = _pointerDownAt;
-                              if (down != null &&
-                                  (e.position - down).distance > 10) {
-                                _pointerDownAt = null;
-                                _userMovedMap();
-                              }
-                            },
-                            onPointerSignal: (_) => _userMovedMap(pan: false),
-                            child: hooks != null
-                                ? hooks.mapView(scene)
-                                : buildMapView(
-                                    visible: onMap,
-                                    controller: _map,
-                                    scene: scene,
-                                    initialCenter:
-                                        widget.settings.center ??
-                                        const LatLng(55.7522, 37.6156),
-                                    initialZoom: widget.settings.zoom ?? 11,
-                                    onLongPress: (point) {
-                                      if (_pick != null) return;
-                                      setState(() {
-                                        _picked = point;
-                                        _pickedLabel = null;
-                                      });
-                                    },
-                                    onCameraChanged: (center, zoom) {
-                                      _saveCamera?.cancel();
-                                      _saveCamera = Timer(
-                                        const Duration(seconds: 1),
-                                        () => widget.settings.saveCamera(
-                                          center,
-                                          zoom,
-                                        ),
-                                      );
-                                    },
-                                  ),
-                          ),
-                          if (onMap)
-                            SafeArea(
-                              minimum: const EdgeInsets.all(Ui.gap),
-                              child: Stack(children: _mapOverlay(context)),
+        child: BackdropGroup(
+          backdropKey: _backdrop,
+          child: ListenableBuilder(
+            // Rebuilt with the route, so "back" always knows what is open.
+            listenable: _route,
+            // The system or hardware back key lands here while there is
+            // something to close; with nothing left it leaves the app.
+            builder: (context, child) => PopScope(
+              canPop: !_canGoBack,
+              onPopInvokedWithResult: (didPop, _) {
+                if (!didPop) _goBack();
+              },
+              child: child!,
+            ),
+            child: Focus(
+              autofocus: true,
+              child: Scaffold(
+                // The map continues under the translucent bottom bar.
+                extendBody: true,
+                body: ListenableBuilder(
+                  listenable: Listenable.merge([
+                    _traffic,
+                    _route,
+                    _positioning,
+                    _downloads,
+                    widget.user.places,
+                    widget.user.searches,
+                  ]),
+                  builder: (context, _) => LayoutBuilder(
+                    builder: (context, box) {
+                      if (box.biggest != _viewSize) {
+                        _viewSize = box.biggest;
+                        _applyDrivePadding();
+                        // Not now: its result rebuilds this widget.
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (mounted) _heatView();
+                        });
+                      }
+                      final scene = _scene(context);
+                      // Any touch brings back the controls hidden on the move.
+                      return Listener(
+                        behavior: HitTestBehavior.translucent,
+                        onPointerDown: (_) => _revealChrome(),
+                        child: Stack(
+                          children: [
+                            // While another section covers the screen the map is
+                            // not drawn, so typing does not compete with it.
+                            Listener(
+                              key: _mapKey,
+                              // A tap only brings the controls back; the camera
+                              // stops following once the finger drags the map.
+                              onPointerDown: (e) => _pointerDownAt = e.position,
+                              onPointerMove: (e) {
+                                final down = _pointerDownAt;
+                                if (down != null &&
+                                    (e.position - down).distance > 10) {
+                                  _pointerDownAt = null;
+                                  _userMovedMap();
+                                }
+                              },
+                              onPointerSignal: (_) => _userMovedMap(pan: false),
+                              child: hooks != null
+                                  ? hooks.mapView(scene)
+                                  : buildMapView(
+                                      visible: onMap,
+                                      controller: _map,
+                                      scene: scene,
+                                      initialCenter:
+                                          widget.settings.center ??
+                                          const LatLng(55.7522, 37.6156),
+                                      initialZoom: widget.settings.zoom ?? 11,
+                                      onLongPress: (point) {
+                                        if (_pick != null) return;
+                                        setState(() {
+                                          _picked = point;
+                                          _pickedLabel = null;
+                                        });
+                                      },
+                                      onCameraChanged: (center, zoom) {
+                                        _saveCamera?.cancel();
+                                        _saveCamera = Timer(
+                                          const Duration(seconds: 1),
+                                          () => widget.settings.saveCamera(
+                                            center,
+                                            zoom,
+                                          ),
+                                        );
+                                      },
+                                    ),
                             ),
-                          if (_searching)
-                            Positioned.fill(
-                              child: Material(
-                                color: Theme.of(context).colorScheme.surface,
-                                child: SafeArea(
-                                  child: SearchPanel(
-                                    database: _places.isEmpty
-                                        ? null
-                                        : _places.first,
-                                    moreDatabases: _places.skip(1).toList(),
-                                    online: _photon,
-                                    near: _searchNear(),
-                                    initialQuery: _initialQuery,
-                                    emptyQuery: _savedPlacesList(),
-                                    onSelected: _onSearchPicked,
-                                    onClose: () => _open(_Section.navigator),
+                            if (onMap)
+                              SafeArea(
+                                minimum: const EdgeInsets.all(Ui.gap),
+                                child: Stack(children: _mapOverlay(context)),
+                              ),
+                            if (_searching)
+                              Positioned.fill(
+                                child: Material(
+                                  color: Theme.of(context).colorScheme.surface,
+                                  child: SafeArea(
+                                    child: SearchPanel(
+                                      database: _places.isEmpty
+                                          ? null
+                                          : _places.first,
+                                      moreDatabases: _places.skip(1).toList(),
+                                      online: _photon,
+                                      near: _searchNear(),
+                                      initialQuery: _initialQuery,
+                                      emptyQuery: _savedPlacesList(),
+                                      onSelected: _onSearchPicked,
+                                      onClose: () => _open(_Section.navigator),
+                                    ),
                                   ),
                                 ),
                               ),
+                            _sectionPages(
+                              _Section.routes,
+                              _routesNav,
+                              (_) => RoutesScreen(
+                                route: _route,
+                                user: widget.user,
+                                services: this,
+                                files: _files,
+                                tab: _routesTab,
+                                onGo: () => _open(_Section.navigator),
+                              ),
                             ),
-                          _sectionPages(
-                            _Section.routes,
-                            _routesNav,
-                            (_) => RoutesScreen(
-                              route: _route,
-                              user: widget.user,
-                              services: this,
-                              files: _files,
-                              tab: _routesTab,
-                              onGo: () => _open(_Section.navigator),
-                            ),
-                          ),
-                          _sectionPages(
-                            _Section.settings,
-                            _settingsNav,
-                            (_) => SettingsScreen(
-                              settings: widget.settings,
-                              traffic: _traffic,
-                              positioning: _positioning,
-                              obd: _obd,
-                              onOpenPacks: _showPacks,
-                              showSensors: hooks == null && Platform.isLinux,
-                              locationAccess: _locationAccess,
-                              user: widget.user,
-                              services: this,
-                              files: _files,
-                              canTilt: _map.maxPitch > 0,
-                              onGoToPlace: _goToPlace,
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-              ),
-              // The main sections sit under the thumb. Picking a point is a
-              // step of its own: the bar gives way to its two buttons.
-              bottomNavigationBar: _pick != null
-                  ? null
-                  : _Collapsible(
-                      collapsed: _chromeHidden,
-                      child: _FrostedBar(
-                        child: NavigationBar(
-                          backgroundColor: Colors.transparent,
-                          surfaceTintColor: Colors.transparent,
-                          elevation: 0,
-                          height: 64,
-                          selectedIndex: _section.index,
-                          onDestinationSelected: (i) =>
-                              _open(_Section.values[i]),
-                          destinations: const [
-                            NavigationDestination(
-                              icon: Icon(Icons.search),
-                              label: 'Поиск',
-                            ),
-                            NavigationDestination(
-                              icon: Icon(Icons.navigation_outlined),
-                              selectedIcon: Icon(Icons.navigation),
-                              label: 'Навигатор',
-                            ),
-                            NavigationDestination(
-                              icon: Icon(Icons.alt_route),
-                              label: 'Маршруты',
-                            ),
-                            NavigationDestination(
-                              icon: Icon(Icons.settings_outlined),
-                              selectedIcon: Icon(Icons.settings),
-                              label: 'Настройки',
+                            _sectionPages(
+                              _Section.settings,
+                              _settingsNav,
+                              (_) => SettingsScreen(
+                                settings: widget.settings,
+                                traffic: _traffic,
+                                positioning: _positioning,
+                                obd: _obd,
+                                onOpenPacks: _showPacks,
+                                showSensors: hooks == null && Platform.isLinux,
+                                showMapResolution:
+                                    hooks == null && Platform.isAndroid,
+                                locationAccess: _locationAccess,
+                                user: widget.user,
+                                services: this,
+                                files: _files,
+                                canTilt: _map.maxPitch > 0,
+                                onGoToPlace: _goToPlace,
+                              ),
                             ),
                           ],
                         ),
+                      );
+                    },
+                  ),
+                ),
+                // The main sections sit under the thumb. Picking a point is a
+                // step of its own: the bar gives way to its two buttons.
+                bottomNavigationBar: _pick != null
+                    ? null
+                    : _Collapsible(
+                        collapsed: _chromeHidden,
+                        child: _FrostedBar(
+                          child: NavigationBar(
+                            backgroundColor: Colors.transparent,
+                            surfaceTintColor: Colors.transparent,
+                            elevation: 0,
+                            height: 64,
+                            selectedIndex: _section.index,
+                            onDestinationSelected: (i) =>
+                                _open(_Section.values[i]),
+                            destinations: const [
+                              NavigationDestination(
+                                icon: Icon(Icons.search),
+                                label: 'Поиск',
+                              ),
+                              NavigationDestination(
+                                icon: Icon(Icons.navigation_outlined),
+                                selectedIcon: Icon(Icons.navigation),
+                                label: 'Навигатор',
+                              ),
+                              NavigationDestination(
+                                icon: Icon(Icons.alt_route),
+                                label: 'Маршруты',
+                              ),
+                              NavigationDestination(
+                                icon: Icon(Icons.settings_outlined),
+                                selectedIcon: Icon(Icons.settings),
+                                label: 'Настройки',
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
-                    ),
+              ),
             ),
           ),
         ),

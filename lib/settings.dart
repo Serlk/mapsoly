@@ -44,6 +44,7 @@ class AppSettings extends ChangeNotifier {
   double? _zoom;
   bool _drive3d = true;
   bool _smoothDrive = true;
+  bool _fullResolutionMap = false;
   bool _speedSound = true;
   bool _signalHeat = false;
   bool _spoofingCheck = true;
@@ -63,6 +64,18 @@ class AppSettings extends ChangeNotifier {
   set smoothDrive(bool value) {
     if (value == _smoothDrive) return;
     _smoothDrive = value;
+    _changed();
+  }
+
+  /// Android: draw the map at every pixel of the screen. Off (the
+  /// default), a large dense screen gets a map of about two million pixels
+  /// scaled up to it: a little softer, and several times less work for a
+  /// tablet's GPU.
+  bool get fullResolutionMap => _fullResolutionMap;
+
+  set fullResolutionMap(bool value) {
+    if (value == _fullResolutionMap) return;
+    _fullResolutionMap = value;
     _changed();
   }
 
@@ -232,6 +245,7 @@ class AppSettings extends ChangeNotifier {
         settings._wardriving = json['wardriving'] == true;
         settings._drive3d = json['drive3d'] != false;
         settings._smoothDrive = json['smoothDrive'] != false;
+        settings._fullResolutionMap = json['fullResolutionMap'] == true;
         settings._speedSound = json['speedSound'] != false;
         settings._signalHeat = json['signalHeat'] == true;
         settings._spoofingCheck = json['spoofingCheck'] != false;
@@ -285,6 +299,7 @@ class AppSettings extends ChangeNotifier {
             'wardriving': _wardriving,
             'drive3d': _drive3d,
             'smoothDrive': _smoothDrive,
+            'fullResolutionMap': _fullResolutionMap,
             'speedSound': _speedSound,
             'signalHeat': _signalHeat,
             'spoofingCheck': _spoofingCheck,

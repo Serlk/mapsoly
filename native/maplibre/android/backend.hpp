@@ -12,11 +12,13 @@
 //    the context is current on a 1x1 pbuffer and nothing is drawn.
 //  - Pacing. Nothing blocks in eglSwapBuffers here (the consumer is Flutter's raster
 //    thread, not the display; swap interval 0 never waits for it), so frames are paced by
-//    the display's vsync from AChoreographer: one frame per vsync, drawn right after it.
+//    the display's vsync from AChoreographer: a frame every one, two, three or four
+//    vsyncs, as many as the GPU turns out to need (see Backend::pace), drawn right after
+//    the vsync, and never before the GPU is done with the previous one.
 //  - No blur pass: Flutter's BackdropFilter reaches the texture.
 class Vsync {
 public:
-    explicit Vsync(std::function<void()> onVsync_)
+    explicit Vsync(std::function<void(int64_t)> onVsync_)
         : onVsync(std::move(onVsync_)) {
         std::promise<void> ready;
         thread = std::thread([this, &ready] {
@@ -54,12 +56,12 @@ public:
     }
 
 private:
-    static void frame(long, void* data) {
+    static void frame(long frameTimeNanos, void* data) {
         auto* self = static_cast<Vsync*>(data);
-        if (!self->quit.load()) self->onVsync();
+        if (!self->quit.load()) self->onVsync(static_cast<int64_t>(frameTimeNanos));
     }
 
-    std::function<void()> onVsync;
+    std::function<void(int64_t)> onVsync;
     std::thread thread;
     ALooper* looper = nullptr;
     AChoreographer* choreographer = nullptr;
@@ -72,7 +74,17 @@ public:
     Backend(ANativeWindow* window, mln::Size fb)
         : mln::gl::RendererBackend(mln::gfx::ContextMode::Unique),
           mln::gfx::Renderable(fb, std::make_unique<Resource>(*this)),
-          vsync(std::make_unique<Vsync>([this] {
+          vsync(std::make_unique<Vsync>([this](int64_t ns) {
+              // The display's period: the shortest time seen between two vsyncs
+              // (starts at 60 Hz; a faster panel shows itself at once).
+              const int64_t last = lastVsyncNs.exchange(ns);
+              const int64_t gap = last > 0 ? (ns - last) / 1000 : 0;
+              if (gap > 3000 && gap < periodUs.load() * 9 / 10) periodUs.store(gap);
+              // Not every vsync gets a frame, see pace().
+              if (vsyncsSince.fetch_add(1) + 1 < divisor()) {
+                  if (vsync) vsync->request();
+                  return;
+              }
               waitingVsync.store(false);
               if (onFrame) onFrame();
           })) {
@@ -96,6 +108,14 @@ public:
         }
         const EGLint ctxAttrs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
         ctx = eglCreateContext(dpy, config, EGL_NO_CONTEXT, ctxAttrs);
+        if (const char* ext = eglQueryString(dpy, EGL_EXTENSIONS)) {
+            if (std::strstr(ext, "EGL_KHR_fence_sync") != nullptr) {
+                createSync = reinterpret_cast<PFNEGLCREATESYNCKHRPROC>(eglGetProcAddress("eglCreateSyncKHR"));
+                waitSync = reinterpret_cast<PFNEGLCLIENTWAITSYNCKHRPROC>(eglGetProcAddress("eglClientWaitSyncKHR"));
+                destroySync = reinterpret_cast<PFNEGLDESTROYSYNCKHRPROC>(eglGetProcAddress("eglDestroySyncKHR"));
+                fenceSync = createSync && waitSync && destroySync;
+            }
+        }
         const EGLint pbufferAttrs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
         pbuffer = eglCreatePbufferSurface(dpy, config, pbufferAttrs);
         if (ctx == EGL_NO_CONTEXT || pbuffer == EGL_NO_SURFACE) {
@@ -173,11 +193,71 @@ public:
         setViewport(0, 0, getSize());
     }
 
+    // How many vsyncs each frame gets: as many as the GPU needs, or the frame rate cap
+    // asks for, whichever is more.
+    int divisor() const {
+        const int fps = capFps.load();
+        const int cap = fps > 0 ? std::max(1, static_cast<int>(std::lround(1e6 / periodUs.load() / fps))) : 1;
+        return std::max(autoDivisor.load(), cap);
+    }
+
+    // mlnb_set_max_fps: here a whole number of vsyncs per frame, not a timer, so that
+    // every frame is on the screen for the same time.
+    void setMaxFps(int fps) { capFps.store(fps); }
+
+    // Called after each frame with what it cost from its start to the GPU being done
+    // with it. A frame that does not fit into one vsync does not get one: a map that
+    // takes 20 ms would otherwise be shown for one, two or three refreshes at random,
+    // which looks far worse than a steady half rate. So the pace is a whole number of
+    // vsyncs, raised at once when frames stop fitting and lowered only after two
+    // seconds of them fitting with room to spare.
+    void pace(int64_t costUs) {
+        costEmaUs = costEmaUs <= 0 ? static_cast<double>(costUs) : costEmaUs * 0.75 + costUs * 0.25;
+        const double period = static_cast<double>(periodUs.load());
+        const int need = std::clamp(static_cast<int>(std::ceil(costEmaUs / (period * 0.85))), 1, 4);
+        const int now = autoDivisor.load();
+        if (need > now) {
+            under = 0;
+            if (++over >= 3) {
+                over = 0;
+                autoDivisor.store(need);
+                MLNB_LOG("mlnb: pace 1 frame per %d vsync (frame %.1f ms, vsync %.1f ms)\n", need,
+                         costEmaUs / 1000.0, period / 1000.0);
+            }
+        } else {
+            over = 0;
+            if (need < now) {
+                if (++under >= 120) {
+                    under = 0;
+                    autoDivisor.store(now - 1);
+                    MLNB_LOG("mlnb: pace 1 frame per %d vsync (frame %.1f ms, vsync %.1f ms)\n", now - 1,
+                             costEmaUs / 1000.0, period / 1000.0);
+                }
+            } else {
+                under = 0;
+            }
+        }
+    }
+
+    int64_t frameStartUs = 0; // set by the owner when it starts a frame
+
     void swapBuffers() {
         const int64_t t0 = monoUs();
         if (!snapshotPath.empty()) writeSnapshot();
         if (eglSurface != EGL_NO_SURFACE) {
-            if (!eglSwapBuffers(dpy, eglSurface)) {
+            // A fence after the frame's last command: when it signals, the GPU is done
+            // with the frame. Waiting for it keeps the map from handing the GPU more
+            // than it can finish (the swap itself never waits here), and tells what the
+            // frame really cost. Flutter waits on the same work before it shows the
+            // picture; a frame it has to wait long for stalls the whole interface.
+            EGLSyncKHR fence = fenceSync ? createSync(dpy, EGL_SYNC_FENCE_KHR, nullptr) : EGL_NO_SYNC_KHR;
+            const bool swapped = eglSwapBuffers(dpy, eglSurface);
+            if (fence != EGL_NO_SYNC_KHR) {
+                waitSync(dpy, fence, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, 50 * 1000 * 1000LL);
+                destroySync(dpy, fence);
+            }
+            if (frameStartUs > 0) pace(monoUs() - frameStartUs);
+            if (!swapped) {
                 // The consumer went away under us (the surface is being replaced): the
                 // owner is about to hand over a new window or none.
                 const EGLint error = eglGetError();
@@ -189,6 +269,7 @@ public:
         }
         lastSwapMs = (monoUs() - t0) / 1000.0;
         if (vsync) {
+            vsyncsSince.store(0);
             waitingVsync.store(true);
             vsync->request();
         }
@@ -252,5 +333,13 @@ private:
     EGLint lastSwapError = EGL_SUCCESS;
     bool constructed = false;
     std::atomic<bool> waitingVsync{false};
+    std::atomic<int64_t> lastVsyncNs{0}, periodUs{16667};
+    std::atomic<int> vsyncsSince{0}, autoDivisor{1}, capFps{0};
+    double costEmaUs = 0;
+    int over = 0, under = 0;
+    bool fenceSync = false;
+    PFNEGLCREATESYNCKHRPROC createSync = nullptr;
+    PFNEGLCLIENTWAITSYNCKHRPROC waitSync = nullptr;
+    PFNEGLDESTROYSYNCKHRPROC destroySync = nullptr;
     std::unique_ptr<Vsync> vsync; // last: its thread calls into this object
 };

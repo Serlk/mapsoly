@@ -30,7 +30,10 @@ abstract class MapSurface {
   /// The pixel ratio a native map is created with for a view of
   /// [devicePixelRatio]. It is fixed per native map: when this value changes
   /// the map has to be created again.
-  double ratioFor(double devicePixelRatio);
+  ///
+  /// [view] is the size of the map in logical pixels, for a surface whose
+  /// ratio depends on how many pixels that makes.
+  double ratioFor(double devicePixelRatio, [Size? view]);
 
   /// Creates the native map for the widget at [rect] (logical pixels in the
   /// window's coordinates). Null when that failed.
@@ -93,7 +96,7 @@ class WaylandMapSurface implements MapSurface {
 
   /// A Wayland buffer scale is an integer.
   @override
-  double ratioFor(double devicePixelRatio) =>
+  double ratioFor(double devicePixelRatio, [Size? view]) =>
       devicePixelRatio.round().clamp(1, 4).toDouble();
 
   @override

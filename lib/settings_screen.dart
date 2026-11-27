@@ -32,6 +32,7 @@ class SettingsScreen extends StatelessWidget {
     required this.obd,
     required this.onOpenPacks,
     this.showSensors = false,
+    this.showMapResolution = false,
     this.locationAccess,
     required this.user,
     required this.services,
@@ -50,6 +51,9 @@ class SettingsScreen extends StatelessWidget {
 
   /// Offers the choice of sensors (Linux; Android needs none).
   final bool showSensors;
+
+  /// Android, where the map may be drawn at fewer pixels than the screen.
+  final bool showMapResolution;
 
   /// See [LocationSheet.access].
   final LocationAccess? locationAccess;
@@ -265,6 +269,20 @@ class SettingsScreen extends StatelessWidget {
                   value: settings.smoothDrive,
                   onChanged: (v) => settings.smoothDrive = v,
                 ),
+                if (showMapResolution)
+                  SwitchListTile(
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: Ui.pad,
+                    ),
+                    title: const Text('Карта в полном разрешении'),
+                    subtitle: const Text(
+                      'Рисовать карту в каждом пикселе экрана. Чётче на '
+                      'больших экранах, но заметно тяжелее для графики; '
+                      'без этого карта рисуется чуть мельче и растягивается',
+                    ),
+                    value: settings.fullResolutionMap,
+                    onChanged: (v) => settings.fullResolutionMap = v,
+                  ),
                 // The marker of the position, when its direction is known.
                 Padding(
                   padding: const EdgeInsets.fromLTRB(Ui.pad, Ui.gap, Ui.pad, 4),

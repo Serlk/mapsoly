@@ -231,6 +231,12 @@ class _GlassState extends State<Glass> {
               // native engine lies outside Flutter's scene; it blurs the
               // rectangles the registry reports.
               filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+              // All panels of a screen share one blurred copy of what is
+              // behind them (see BackdropGroup in the map screen) instead
+              // of each making its own: on Android the map is a texture
+              // that changes every frame, and every copy is a pass over
+              // the whole screen.
+              backdropGroupKey: BackdropGroup.of(context)?.backdropKey,
               child: surface,
             ),
     );
