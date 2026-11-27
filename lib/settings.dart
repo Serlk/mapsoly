@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'map/position_arrow.dart';
 import 'obd/obd_service.dart';
 import 'positioning/sources/linux_compass.dart';
 import 'traffic/traffic.dart';
@@ -45,6 +46,7 @@ class AppSettings extends ChangeNotifier {
   bool _speedSound = true;
   CompassChoice _compass = CompassChoice.auto;
   String? _magnetSensor, _accelSensor;
+  PositionArrow _positionArrow = PositionArrow.chevron;
   bool _tilted = false;
 
   /// Whether the camera tilts and turns along the route during guidance
@@ -88,6 +90,15 @@ class AppSettings extends ChangeNotifier {
     _compass = choice;
     _magnetSensor = magnet;
     _accelSensor = accel;
+    _changed();
+  }
+
+  /// How the position is drawn when its direction is known.
+  PositionArrow get positionArrow => _positionArrow;
+
+  set positionArrow(PositionArrow value) {
+    if (value == _positionArrow) return;
+    _positionArrow = value;
     _changed();
   }
 
@@ -186,6 +197,10 @@ class AppSettings extends ChangeNotifier {
         settings._speedSound = json['speedSound'] != false;
         settings._compass = _byName(CompassChoice.values, json['compass']);
         settings._magnetSensor = json['magnetSensor'] as String?;
+        settings._positionArrow = _byName(
+          PositionArrow.values,
+          json['positionArrow'],
+        );
         settings._accelSensor = json['accelSensor'] as String?;
         settings._tilted = json['tilted'] == true;
         final obd = json['obd'];
@@ -231,6 +246,7 @@ class AppSettings extends ChangeNotifier {
             'drive3d': _drive3d,
             'speedSound': _speedSound,
             'compass': _compass.name,
+            'positionArrow': _positionArrow.name,
             if (_magnetSensor != null) 'magnetSensor': _magnetSensor,
             if (_accelSensor != null) 'accelSensor': _accelSensor,
             'tilted': _tilted,

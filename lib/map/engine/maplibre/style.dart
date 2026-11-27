@@ -41,6 +41,7 @@ abstract final class MapIds {
   static const accuracy = 'mapsoly-accuracy';
   static const pinTo = 'mapsoly-pin-to';
   static const pinPicked = 'mapsoly-pin-picked';
+  static const arrow = 'mapsoly-arrow';
 
   /// Lowest overlay layer: traffic goes right below it (above the roads,
   /// below the route and the labels).
@@ -146,6 +147,22 @@ List<Map<String, Object>> markerLayers(OverlayColors c) => [
     },
   },
   {
+    // The position with a known direction: an arrow lying on the map,
+    // turned to the heading.
+    'id': 'mapsoly-position-arrow',
+    'type': 'symbol',
+    'source': MapIds.points,
+    'filter': ['==', 'kind', 'position-heading'],
+    'layout': {
+      'icon-image': MapIds.arrow,
+      'icon-rotate': ['get', 'heading'],
+      'icon-rotation-alignment': 'map',
+      'icon-pitch-alignment': 'map',
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
+    },
+  },
+  {
     'id': 'mapsoly-from',
     'type': 'circle',
     'source': MapIds.points,
@@ -161,7 +178,11 @@ List<Map<String, Object>> markerLayers(OverlayColors c) => [
     'id': 'mapsoly-pins',
     'type': 'symbol',
     'source': MapIds.points,
-    'filter': ['has', 'icon'],
+    'filter': [
+      'all',
+      ['has', 'icon'],
+      ['!=', 'kind', 'position-heading'],
+    ],
     'layout': {
       'icon-image': '{icon}',
       'icon-anchor': 'bottom',

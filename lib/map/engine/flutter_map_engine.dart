@@ -9,6 +9,7 @@ import '../../offline/pmtiles_tile_provider.dart';
 import '../../traffic/traffic.dart';
 import '../../traffic/traffic_sampler.dart';
 import '../../traffic/yandex_tile_provider.dart';
+import '../position_arrow.dart';
 import 'map_engine.dart';
 
 /// Camera control for [FlutterMapView].
@@ -214,15 +215,31 @@ class FlutterMapView extends StatelessWidget {
             borderColor: colors.primary.withValues(alpha: 0.5),
             borderStrokeWidth: 1,
           ),
-          CircleMarker(
-            point: point,
-            radius: 7,
-            color: colors.primary,
-            borderColor: colors.surface,
-            borderStrokeWidth: 3,
-          ),
+          if (scene.positionHeading == null)
+            CircleMarker(
+              point: point,
+              radius: 7,
+              color: colors.primary,
+              borderColor: colors.surface,
+              borderStrokeWidth: 3,
+            ),
         ],
       ),
+      // With a known direction: an arrow, turning with the map.
+      if (scene.positionHeading != null)
+        MarkerLayer(
+          markers: [
+            Marker(
+              point: point,
+              width: 44,
+              height: 44,
+              child: PositionArrowIcon(
+                style: scene.positionArrow,
+                headingDeg: scene.positionHeading!,
+              ),
+            ),
+          ],
+        ),
     ];
   }
 

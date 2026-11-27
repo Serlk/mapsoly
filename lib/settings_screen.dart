@@ -1,3 +1,4 @@
+import 'map/position_arrow.dart';
 import 'sensors_screen.dart';
 import 'package:flutter/material.dart';
 
@@ -233,6 +234,39 @@ class SettingsScreen extends StatelessWidget {
                     value: settings.drive3d,
                     onChanged: (v) => settings.drive3d = v,
                   ),
+                // The marker of the position, when its direction is known.
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(Ui.pad, Ui.gap, Ui.pad, 4),
+                  child: Text(
+                    'Значок моего положения',
+                    style: Theme.of(context).textTheme.bodyLarge,
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: Ui.pad),
+                  child: Wrap(
+                    spacing: Ui.gap,
+                    runSpacing: Ui.gap,
+                    children: [
+                      for (final arrow in PositionArrow.values)
+                        _ArrowChoice(
+                          arrow: arrow,
+                          selected: settings.positionArrow == arrow,
+                          onTap: () => settings.positionArrow = arrow,
+                        ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(Ui.pad, 4, Ui.pad, Ui.gap),
+                  child: Text(
+                    'Показывает, куда вы едете или куда смотрит телефон. '
+                    'Без компаса и без движения остаётся точка.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
                 SwitchListTile(
                   contentPadding: const EdgeInsets.symmetric(
                     horizontal: Ui.pad,
@@ -345,6 +379,60 @@ class SettingsScreen extends StatelessWidget {
               ],
             );
           },
+        ),
+      ),
+    );
+  }
+}
+
+/// One of the position markers to choose from: its picture and name.
+class _ArrowChoice extends StatelessWidget {
+  const _ArrowChoice({
+    required this.arrow,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final PositionArrow arrow;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: arrow.label,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(Ui.radiusSmall),
+        onTap: onTap,
+        child: Container(
+          width: 104,
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+          decoration: BoxDecoration(
+            color: selected ? colors.primary.withValues(alpha: 0.12) : null,
+            borderRadius: BorderRadius.circular(Ui.radiusSmall),
+            border: Border.all(
+              color: selected ? colors.primary : colors.outlineVariant,
+              width: selected ? 2 : 1,
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              PositionArrowIcon(style: arrow, size: 44),
+              const SizedBox(height: 6),
+              ExcludeSemantics(
+                child: Text(
+                  arrow.label,
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

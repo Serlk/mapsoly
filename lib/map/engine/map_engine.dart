@@ -4,6 +4,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../../offline/offline_map.dart';
 import '../../traffic/traffic.dart';
+import '../position_arrow.dart';
 import '../../traffic/traffic_sampler.dart';
 
 /// Everything the map should show, independent of the rendering engine.
@@ -28,6 +29,8 @@ class MapScene {
     this.picked,
     this.position,
     this.positionAccuracyM,
+    this.positionHeading,
+    this.positionArrow = PositionArrow.chevron,
   });
 
   /// Dark map style.
@@ -77,6 +80,12 @@ class MapScene {
   /// Device position with its accuracy radius in metres.
   final LatLng? position;
   final double? positionAccuracyM;
+
+  /// Where the device or the car is heading, degrees clockwise from north;
+  /// null when not known. With it the position is drawn as
+  /// [positionArrow], without it as a dot.
+  final double? positionHeading;
+  final PositionArrow positionArrow;
 }
 
 /// Which traffic tiles to draw. [version] changes when the data is refreshed.

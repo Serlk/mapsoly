@@ -91,10 +91,11 @@ void main() {
       });
 
       test('markers are on top, pins last', () {
-        expect(ids.sublist(ids.length - 5), [
+        expect(ids.sublist(ids.length - 6), [
           'mapsoly-accuracy-fill',
           'mapsoly-accuracy-line',
           'mapsoly-position',
+          'mapsoly-position-arrow',
           'mapsoly-from',
           'mapsoly-pins',
         ]);

@@ -12,6 +12,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../../offline/pmtiles.dart';
 import 'flutter_map_engine.dart';
+import '../position_arrow.dart';
 import 'map_engine.dart';
 import 'maplibre/bridge.dart';
 import 'maplibre/camera.dart';
@@ -584,10 +585,12 @@ class _MapLibreViewState extends State<MapLibreView>
           : '${_dark ? 'dark' : 'bright'}|'
                 '${[for (final p in packs) '${p.path}#${identityHashCode(p.archive)}'].join(',')}|'
                 '${scene.buildings3d ? '3d' : ''}|'
-                '${colors.primary}|${colors.surface}|${colors.outline}',
+                '${colors.primary}|${colors.surface}|${colors.outline}|'
+                '${scene.positionArrow.name}',
       routes: _routesJson,
       points: pointsGeoJson(
         position: scene.position,
+        heading: scene.positionHeading,
         from: scene.from,
         to: scene.to,
         picked: scene.picked,
@@ -764,7 +767,7 @@ class _MapLibreViewState extends State<MapLibreView>
     final map = _map;
     if (key == null || map == null) return;
     final scheme = Theme.of(context).colorScheme;
-    final pins = await _pinImages(scheme, _scale);
+    final pins = await _pinImages(scheme, _scale, widget.scene.positionArrow);
     if (_disposed || _map != map || _loadingStyle != key) return;
     for (final p in pins) {
       _bridge!.addImage(
@@ -805,8 +808,16 @@ class _MapLibreViewState extends State<MapLibreView>
   Future<List<({String id, Uint8List rgba, int width, int height})>> _pinImages(
     ColorScheme scheme,
     int scale,
+    PositionArrow arrow,
   ) {
-    final key = (scheme.error, scheme.tertiary, scale);
+    final key = (
+      scheme.error,
+      scheme.tertiary,
+      scheme.primary,
+      scheme.surface,
+      scale,
+      arrow,
+    );
     if (_pinsKey == key && _pins != null) return _pins!;
     _pinsKey = key;
     Future<({String id, Uint8List rgba, int width, int height})> draw(
@@ -844,7 +855,32 @@ class _MapLibreViewState extends State<MapLibreView>
       );
     }
 
+    Future<({String id, Uint8List rgba, int width, int height})>
+    drawArrow() async {
+      final side = 44 * scale;
+      final recorder = ui.PictureRecorder();
+      paintPositionArrow(
+        Canvas(recorder),
+        side.toDouble(),
+        arrow,
+        color: scheme.primary,
+        outline: scheme.surface,
+      );
+      final image = await recorder.endRecording().toImage(side, side);
+      final data = await image.toByteData(
+        format: ui.ImageByteFormat.rawStraightRgba,
+      );
+      image.dispose();
+      return (
+        id: MapIds.arrow,
+        rgba: data!.buffer.asUint8List(),
+        width: side,
+        height: side,
+      );
+    }
+
     return _pins = Future.wait([
+      drawArrow(),
       draw(MapIds.pinTo, Icons.place, scheme.error),
       draw(MapIds.pinPicked, Icons.location_on, scheme.tertiary),
     ]);

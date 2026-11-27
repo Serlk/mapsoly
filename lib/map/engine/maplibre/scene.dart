@@ -109,20 +109,32 @@ String routesGeoJson(
 /// Position dot and the three markers as point features.
 String pointsGeoJson({
   LatLng? position,
+  double? heading,
   LatLng? from,
   LatLng? to,
   LatLng? picked,
 }) {
-  Map<String, Object> point(LatLng p, String kind, [String? icon]) => {
+  Map<String, Object> point(
+    LatLng p,
+    String kind, [
+    String? icon,
+    double? heading,
+  ]) => {
     'type': 'Feature',
-    'properties': {'kind': kind, 'icon': ?icon},
+    // A position with a heading is drawn as an arrow, else as a dot.
+    'properties': {
+      'kind': heading == null ? kind : '$kind-heading',
+      'icon': ?icon,
+      'heading': ?heading,
+    },
     'geometry': {'type': 'Point', 'coordinates': _lonLat(p)},
   };
   if (position == null && from == null && to == null && picked == null) {
     return SceneState.emptyGeoJson;
   }
   return _collection([
-    if (position != null) point(position, 'position'),
+    if (position != null)
+      point(position, 'position', null, heading?.roundToDouble()),
     if (from != null) point(from, 'from'),
     if (to != null) point(to, 'to', MapIds.pinTo),
     if (picked != null) point(picked, 'picked', MapIds.pinPicked),

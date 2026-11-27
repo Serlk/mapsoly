@@ -165,6 +165,8 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   Offset? _pointerDownAt;
   bool _cruising = false;
   bool _compassMode = false;
+  double? _markerHeading;
+  final _markerSmoother = AngleSmoother(deadbandDeg: 2, factor: 0.5);
   bool _hasCompass = false;
 
   // Map downloads: they go on while the "Maps" screen is closed.
@@ -448,6 +450,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     widget.settings.removeListener(_applyLocationSettings);
     widget.settings.removeListener(_applySensorSettings);
     _map.cameraChanges.removeListener(_onCameraMoved);
+    _hasCompass = false;
     _compassSub?.cancel();
     _compass?.stop();
     _obd?.dispose();
@@ -602,6 +605,7 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     if (hooked != null) {
       _compass = hooked;
       _hasCompass = true;
+      _startCompass();
       return;
     }
     if (widget.testHooks != null || !Platform.isLinux) return;
@@ -616,6 +620,9 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
       _compass = found ? compass : null;
       if (!found) unawaited(compass.dispose());
       setState(() => _hasCompass = found);
+      // It runs all the time: the arrow on the map shows where the device
+      // points.
+      if (found) _startCompass();
     } on Object catch (e) {
       debugPrint('Compass not found: $e');
     }
@@ -632,14 +639,12 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
   /// and look again.
   void _applySensorSettings() {
     if (widget.testHooks != null || _compassKey == _compassSettingsKey) return;
-    final wasFollowing = _compassMode || _locationMode == LocationMode.heading;
-    _stopCompass();
+    _stopCompass(force: true);
+    _hasCompass = false;
     final old = _compass;
     _compass = null;
     if (old is DeviceCompass) unawaited(old.dispose());
-    _findCompass().then((_) {
-      if (mounted && wasFollowing && _compass != null) _startCompass();
-    });
+    unawaited(_findCompass());
   }
 
   void _startCompass() {
@@ -654,6 +659,14 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
         _compassHeading = h;
         _followPosition();
         _followCompass();
+        // The arrow on the map turns in steps large enough to be seen, so
+        // the screen is not rebuilt for every wobble of the needle.
+        final shown = _markerSmoother.update(h);
+        final old = _markerHeading;
+        if (old == null || angleDelta(old, shown).abs() >= 2) {
+          _markerHeading = shown;
+          if (_section == _Section.navigator) _rebuild();
+        }
       });
       unawaited(
         compass.start().catchError((Object e) {
@@ -665,7 +678,13 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
     }
   }
 
-  void _stopCompass() {
+  /// Stops following the compass. While the device has one it keeps
+  /// running for the arrow on the map, unless [force]d (the sensors
+  /// changed, or the screen is going away).
+  void _stopCompass({bool force = false}) {
+    if (_hasCompass && !force) return;
+    _markerHeading = null;
+    _markerSmoother.reset();
     _compassSub?.cancel();
     _compassSub = null;
     _compassHeading = null;
@@ -822,6 +841,14 @@ class _MapScreenState extends State<MapScreen> implements MapServices {
           _route.progress?.point ??
           (fix == null ? _route.myPosition : LatLng(fix.lat, fix.lon)),
       positionAccuracyM: fix?.accuracyM,
+      // Along the route when guided, along the course when moving, else
+      // where the device points.
+      positionHeading: _route.progress != null
+          ? _route.routeBearing
+          : fix != null && (fix.speedMps ?? 0) > 1.5 && fix.courseDeg != null
+          ? fix.courseDeg
+          : _markerHeading,
+      positionArrow: widget.settings.positionArrow,
     );
   }
 

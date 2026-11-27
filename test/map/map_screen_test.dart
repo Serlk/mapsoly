@@ -9,6 +9,7 @@ import 'package:mapsoly/main.dart';
 import 'package:mapsoly/map/drive_camera.dart';
 import 'package:mapsoly/map/engine/map_engine.dart';
 import 'package:mapsoly/map/map_screen.dart';
+import 'package:mapsoly/map/position_arrow.dart';
 import 'package:mapsoly/map/route_controller.dart';
 import 'package:mapsoly/map/speedometer.dart';
 import 'package:mapsoly/map/route_panel.dart';
@@ -482,14 +483,24 @@ void main() {
     await tester.pumpAndSettle();
     expect(map.bearing, closeTo(90, 1));
     await shot(tester, 'map_compass_mode');
-    // Again: north-up, and the compass is released.
+    // Again: north-up.
     await tester.tap(find.byTooltip('Карта по компасу: выключить'));
     await tester.pumpAndSettle();
     expect(map.bearing, 0);
-    expect(compass.started, isFalse);
+    // The compass keeps running for the arrow on the map, which needs a
+    // position; the map itself no longer turns.
     compass.controller.add(180);
     await tester.pumpAndSettle();
     expect(map.bearing, 0);
+    await fix(tester, palace);
+    compass.controller.add(180);
+    await tester.pumpAndSettle();
+    compass.controller.add(180);
+    await tester.pumpAndSettle();
+    expect(scene!.position, isNotNull);
+    expect(scene!.positionHeading, closeTo(180, 45));
+    expect(scene!.positionArrow, PositionArrow.chevron);
+    await shot(tester, 'map_position_arrow');
   });
 
   testWidgets('moving without a route: 3D and no controls, unless off', (

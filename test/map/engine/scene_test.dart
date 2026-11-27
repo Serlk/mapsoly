@@ -57,6 +57,15 @@ void main() {
       expect(diffScene(s, same), isEmpty);
     });
 
+    test('a position with a heading is an arrow, without one a dot', () {
+      final dot = pointsGeoJson(position: a);
+      final arrow = pointsGeoJson(position: a, heading: 123.4);
+      expect(dot, contains('"kind":"position"'));
+      expect(dot, isNot(contains('heading')));
+      expect(arrow, contains('"kind":"position-heading"'));
+      expect(arrow, contains('"heading":123.0'));
+    });
+
     test('traffic along the route becomes coloured pieces of its line', () {
       final plain = routesGeoJson([a, b, c], []);
       final coloured = routesGeoJson(
